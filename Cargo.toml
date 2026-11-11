@@ -5,3 +5,4 @@ edition = "2024"
 authors = ["Harasees Singh harasees1202@gmail.com"]
 
 [dependencies]
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
