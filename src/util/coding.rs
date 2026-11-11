@@ -147,7 +147,7 @@ mod tests {
         put_fixed32(&mut buf, 0x04030201);
         put_fixed32(&mut buf, 0);
         put_fixed32(&mut buf, u32::MAX);
-        assert_eq!(buf, [b'A', b'B', 1, 2, 3, 4, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(buf, [b'A', b'B', 1, 2, 3, 4, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
 
         let mut buf = b"AB".to_vec();
         put_fixed64(&mut buf, 0x0807060504030201);
