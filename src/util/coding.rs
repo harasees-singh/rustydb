@@ -72,7 +72,7 @@ pub(crate) fn get_varint32(input: &mut &[u8], value: &mut u32) -> bool {
         result |= ((byte & (B - 1u8)) as u32) << shift;
         shift += 7;
         if byte & B == 0 {
-            *input = &bytes[i + 1..];   // advance past what we consumed
+            *input = &bytes[i + 1..]; // advance past what we consumed
             *value = result;
             return true;
         }
@@ -90,7 +90,7 @@ pub(crate) fn get_varint64(input: &mut &[u8], value: &mut u64) -> bool {
         result |= ((byte & (B - 1u8)) as u64) << shift;
         shift += 7;
         if byte & B == 0 {
-            *input = &bytes[i + 1..];   // advance past what we consumed
+            *input = &bytes[i + 1..]; // advance past what we consumed
             *value = result;
             return true;
         }
@@ -98,8 +98,8 @@ pub(crate) fn get_varint64(input: &mut &[u8], value: &mut u64) -> bool {
     false
 }
 
-pub(crate) fn get_length_prefixed_slice<'a>(input: &mut &'a[u8], result: &mut &'a[u8]) -> bool {
-    let len : &mut u32 = &mut 0;
+pub(crate) fn get_length_prefixed_slice<'a>(input: &mut &'a [u8], result: &mut &'a [u8]) -> bool {
+    let len: &mut u32 = &mut 0;
     if !get_varint32(input, len) {
         return false;
     }
@@ -147,7 +147,10 @@ mod tests {
         put_fixed32(&mut buf, 0x04030201);
         put_fixed32(&mut buf, 0);
         put_fixed32(&mut buf, u32::MAX);
-        assert_eq!(buf, [b'A', b'B', 1, 2, 3, 4, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(
+            buf,
+            [b'A', b'B', 1, 2, 3, 4, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]
+        );
 
         let mut buf = b"AB".to_vec();
         put_fixed64(&mut buf, 0x0807060504030201);
@@ -206,7 +209,11 @@ mod tests {
         ];
         for &(value, expected) in cases {
             assert_eq!(encode_varint32(value), expected, "value {value}");
-            assert_eq!(varint_length(value as u64), expected.len(), "length of {value}");
+            assert_eq!(
+                varint_length(value as u64),
+                expected.len(),
+                "length of {value}"
+            );
         }
     }
 
@@ -216,8 +223,14 @@ mod tests {
             (0, &[0x00]),
             (300, &[0xAC, 0x02]),
             (1 << 32, &[0x80, 0x80, 0x80, 0x80, 0x10]),
-            (1 << 63, &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]),
-            (u64::MAX, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]),
+            (
+                1 << 63,
+                &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01],
+            ),
+            (
+                u64::MAX,
+                &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01],
+            ),
         ];
         for &(value, expected) in cases {
             assert_eq!(encode_varint64(value), expected, "value {value}");

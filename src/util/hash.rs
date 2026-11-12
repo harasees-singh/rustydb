@@ -75,7 +75,10 @@ mod tests {
         for counts in [&shards, &low] {
             for &c in counts {
                 // Within 5% of a perfectly even split.
-                assert!(c > expected * 95 / 100 && c < expected * 105 / 100, "{counts:?}");
+                assert!(
+                    c > expected * 95 / 100 && c < expected * 105 / 100,
+                    "{counts:?}"
+                );
             }
         }
     }

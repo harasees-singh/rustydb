@@ -1,4 +1,4 @@
-use crc_fast::{checksum, CrcAlgorithm::Crc32Iscsi, Digest};
+use crc_fast::{CrcAlgorithm::Crc32Iscsi, Digest, checksum};
 
 // using Castagnoli polynomial for CRC32C (Crc32Iscsi)
 
@@ -67,7 +67,15 @@ mod tests {
 
     #[test]
     fn mask_is_reversible_for_edge_and_sampled_values() {
-        let edges = [0, 1, 0x8000_0000, 0xffff_ffff, M, M.wrapping_sub(1), M.wrapping_add(1)];
+        let edges = [
+            0,
+            1,
+            0x8000_0000,
+            0xffff_ffff,
+            M,
+            M.wrapping_sub(1),
+            M.wrapping_add(1),
+        ];
         for crc in edges {
             assert_eq!(unmask(mask(crc)), crc, "crc {crc:#x}");
             assert_eq!(mask(unmask(crc)), crc, "masked {crc:#x}");
