@@ -19,16 +19,8 @@ impl FilterPolicy for BloomFilterPolicy {
 
         // double-hash the keys and populate the bloom filter
         for key in keys {
-            let hash = crate::util::hash::hash(key);
-            // divide the hash into 2 32 bit parts and use for the second hashing
-            let hash1: u32 = (hash >> 32) as u32;
-            let hash2: u32 = (hash.rotate_left(32) >> 32) as u32;
-
-            // calculate the second hash iteratively and set the corresponding bits in the bloom filter
-            for i in 0..K as u32 {
-                let bit = (hash1.wrapping_add(hash2.wrapping_mul(i)) % ((sz * 8) as u32)) as usize;
-                let byte = pt + bit / 8;
-                dst[byte] |= 1 << (bit % 8);
+            for bit in probes(key, (sz * 8) as u32, K) {
+                dst[pt + bit / 8] |= 1 << (bit % 8);
             }
         }
         // append the K byte to the end of the filter so that reader can access K
@@ -42,21 +34,20 @@ impl FilterPolicy for BloomFilterPolicy {
 
         // exclude the last K byte
         let sz = filter.len() - 1;
-
-        let hash = crate::util::hash::hash(key);
-        let hash1: u32 = (hash >> 32) as u32;
-        let hash2: u32 = (hash.rotate_left(32) >> 32) as u32;
-
         let k: u8 = *filter.last().unwrap();
-
-        for i in 0..k as u32 {
-            let bit = (hash1.wrapping_add(hash2.wrapping_mul(i)) % ((sz * 8) as u32)) as usize;
-            let byte = bit / 8;
-            if filter[byte] & (1 << (bit % 8)) == 0 {
-                return false;
-            }
-        }
-
-        true
+        probes(key, (sz * 8) as u32, k).all(|bit| filter[bit / 8] & (1 << (bit % 8)) != 0)
     }
+}
+
+/// Bit positions probed for `key` in a filter of `bits` bits, using `k` probes.
+///
+/// The writer sets these bits and the reader tests them, so both must use this
+/// one function: any difference between the two would cause false negatives.
+#[inline]
+fn probes(key: &[u8], bits: u32, k: u8) -> impl Iterator<Item = usize> {
+    let hash = crate::util::hash::hash(key);
+    // split the 64-bit hash into two 32-bit halves for double hashing
+    let h1 = (hash >> 32) as u32;
+    let h2 = hash as u32;
+    (0..k as u32).map(move |i| (h1.wrapping_add(h2.wrapping_mul(i)) % bits) as usize)
 }
