@@ -51,3 +51,148 @@ fn probes(key: &[u8], bits: u32, k: u8) -> impl Iterator<Item = usize> {
     let h2 = hash as u32;
     (0..k as u32).map(move |i| (h1.wrapping_add(h2.wrapping_mul(i)) % bits) as usize)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const POLICY: BloomFilterPolicy = BloomFilterPolicy {};
+
+    fn make_keys(n: usize, prefix: &str) -> Vec<Vec<u8>> {
+        (0..n).map(|i| format!("{prefix}-{i}").into_bytes()).collect()
+    }
+
+    fn build(keys: &[Vec<u8>]) -> Vec<u8> {
+        let refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let mut dst = Vec::new();
+        POLICY.create_filter(&refs, &mut dst);
+        dst
+    }
+
+    #[test]
+    fn name_is_fixed() {
+        assert_eq!(POLICY.name(), NAME);
+    }
+
+    #[test]
+    fn has_no_false_negatives_at_any_size() {
+        for n in [0, 1, 2, 7, 8, 9, 100, 1_000, 10_000] {
+            let keys = make_keys(n, "key");
+            let filter = build(&keys);
+            for key in &keys {
+                assert!(POLICY.key_may_match(key, &filter), "n={n} key={key:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn layout_is_bit_array_then_k_byte_with_an_8_byte_floor() {
+        for n in [0, 1, 4, 5, 100, 1_000] {
+            let filter = build(&make_keys(n, "key"));
+            let bytes = std::cmp::max((n * N).div_ceil(8), 8);
+            assert_eq!(filter.len(), bytes + 1, "n={n}");
+            assert_eq!(*filter.last().unwrap(), K, "n={n}");
+        }
+    }
+
+    #[test]
+    fn output_is_pinned() {
+        // The filter is persisted, so its exact bytes must never change by accident.
+        let keys = [b"hello".to_vec(), b"world".to_vec()];
+        assert_eq!(build(&keys), [72, 146, 36, 170, 42, 0, 0, 0, 7]);
+    }
+
+    #[test]
+    fn false_positive_rate_is_near_the_design_target() {
+        // 15 bits per key with 7 probes should give about 0.1%.
+        let filter = build(&make_keys(10_000, "key"));
+        let probes = 100_000;
+        let hits = make_keys(probes, "absent")
+            .iter()
+            .filter(|k| POLICY.key_may_match(k, &filter))
+            .count();
+        assert!(hits < probes / 200, "false positive rate too high: {hits}/{probes}");
+    }
+
+    #[test]
+    fn a_filter_for_no_keys_matches_nothing() {
+        let filter = build(&[]);
+        assert_eq!(filter.len(), 9);
+        for key in make_keys(1_000, "absent") {
+            assert!(!POLICY.key_may_match(&key, &filter));
+        }
+        assert!(!POLICY.key_may_match(b"", &filter));
+    }
+
+    #[test]
+    fn unusable_filters_answer_maybe_without_panicking() {
+        assert!(POLICY.key_may_match(b"key", &[]));
+        assert!(POLICY.key_may_match(b"key", &[K]));
+    }
+
+    #[test]
+    fn handles_empty_binary_and_duplicate_keys() {
+        let keys = vec![vec![], vec![0x00], vec![0xff, 0xff], vec![0x00, 0x01, 0x02], vec![0x00]];
+        let filter = build(&keys);
+        for key in &keys {
+            assert!(POLICY.key_may_match(key, &filter), "key={key:?}");
+        }
+    }
+
+    #[test]
+    fn create_filter_appends_and_leaves_existing_bytes_alone() {
+        let keys = make_keys(50, "key");
+        let refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let mut dst = vec![0xAA, 0xBB, 0xCC];
+        POLICY.create_filter(&refs, &mut dst);
+        assert_eq!(&dst[..3], &[0xAA, 0xBB, 0xCC]);
+        assert_eq!(&dst[3..], build(&keys).as_slice());
+    }
+
+    #[test]
+    fn filters_written_back_to_back_are_each_readable() {
+        let a = make_keys(30, "a");
+        let b = make_keys(500, "b");
+        let (refs_a, refs_b): (Vec<&[u8]>, Vec<&[u8]>) = (
+            a.iter().map(|k| k.as_slice()).collect(),
+            b.iter().map(|k| k.as_slice()).collect(),
+        );
+        let mut dst = Vec::new();
+        POLICY.create_filter(&refs_a, &mut dst);
+        let split = dst.len();
+        POLICY.create_filter(&refs_b, &mut dst);
+        let (fa, fb) = dst.split_at(split);
+        assert!(a.iter().all(|k| POLICY.key_may_match(k, fa)));
+        assert!(b.iter().all(|k| POLICY.key_may_match(k, fb)));
+    }
+
+    #[test]
+    fn reader_uses_the_k_stored_in_the_filter() {
+        let keys = make_keys(100, "key");
+        let mut filter = build(&keys);
+        // Fewer probes than were written is still a subset, so no key can be lost.
+        *filter.last_mut().unwrap() = 1;
+        assert!(keys.iter().all(|k| POLICY.key_may_match(k, &filter)));
+
+        // With the bit array cleared, any stored k >= 1 rejects every key.
+        let mut empty = vec![0u8; 16];
+        empty.push(3);
+        assert!(!POLICY.key_may_match(b"anything", &empty));
+
+        // With every bit set, every key matches.
+        let mut full = vec![0xffu8; 16];
+        full.push(3);
+        assert!(POLICY.key_may_match(b"anything", &full));
+    }
+
+    #[test]
+    fn probe_positions_are_in_range_and_deterministic() {
+        for bits in [8u32, 64, 1_000, 80_000] {
+            let first: Vec<usize> = probes(b"some key", bits, K).collect();
+            let second: Vec<usize> = probes(b"some key", bits, K).collect();
+            assert_eq!(first, second);
+            assert_eq!(first.len(), K as usize);
+            assert!(first.iter().all(|&b| b < bits as usize));
+        }
+    }
+}
