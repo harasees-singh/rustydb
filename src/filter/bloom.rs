@@ -12,7 +12,7 @@ impl FilterPolicy for BloomFilterPolicy {
     fn create_filter(&self, keys: &[&[u8]], dst: &mut Vec<u8>) {
         // number of bits for the filter (appended to dst) is N * number of keys for a ~0.1% False Positive error rate with N = 15
         // round up to bytes and take floor with 8 bytes
-        let sz = std::cmp::min((keys.len() * N) / 8, 8);
+        let sz = std::cmp::max(((keys.len() * N) + 7) / 8, 8);
         let pt: usize = dst.len();
 
         dst.append(&mut vec![0; sz]);
@@ -26,8 +26,8 @@ impl FilterPolicy for BloomFilterPolicy {
 
             // calculate the second hash iteratively and set the corresponding bits in the bloom filter
             for i in 0..K as u32 {
-                let bit: usize = ((hash1 + i * hash2) % ((sz * 8) as u32)) as usize;
-                let byte = pt + bit/8;
+                let bit = (hash1.wrapping_add(hash2.wrapping_mul(i)) % ((sz * 8) as u32)) as usize;
+                let byte = pt + bit / 8;
                 dst[byte] |= 1 << (bit % 8);
             }
         }
