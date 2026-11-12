@@ -36,6 +36,27 @@ impl FilterPolicy for BloomFilterPolicy {
     }
 
     fn key_may_match(&self, key: &[u8], filter: &[u8]) -> bool {
-        todo!()
+        if filter.len() < 2 {
+            return true;
+        }
+
+        // exclude the last K byte
+        let sz = filter.len() - 1;
+
+        let hash = crate::util::hash::hash(key);
+        let hash1: u32 = (hash >> 32) as u32;
+        let hash2: u32 = (hash.rotate_left(32) >> 32) as u32;
+
+        let k: u8 = *filter.last().unwrap();
+
+        for i in 0..k as u32 {
+            let bit = (hash1.wrapping_add(hash2.wrapping_mul(i)) % ((sz * 8) as u32)) as usize;
+            let byte = bit / 8;
+            if filter[byte] & (1 << (bit % 8)) == 0 {
+                return false;
+            }
+        }
+
+        true
     }
 }
