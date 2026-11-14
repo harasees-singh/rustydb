@@ -127,8 +127,7 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> Shard<K, V, P> {
 
         evicted
             .drain(..)
-            .map(|e| self.remove_slot(e))
-            .flatten()
+            .flat_map(|e| self.remove_slot(e))
             .for_each(|e| dropped.push(e.value));
 
         self.evicted = evicted;
