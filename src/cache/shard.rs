@@ -97,11 +97,13 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> Shard<K, V, P> {
         let entry_id = self.table.get(key)?;
         self.policy.access(*entry_id, hash);
         let entry: &Entry<K, V> = self.slab[entry_id.index()].as_ref()?;
+
         Some(Arc::clone(&entry.value))
     }
     pub(crate) fn erase(&mut self, hash: u64, key: &K) -> Option<Arc<V>> {
         let entry_id = self.table.get(key)?;
         self.policy.remove(*entry_id);
+
         self.remove_slot(*entry_id).map(|e| e.value)
     }
     pub(crate) fn prune(&mut self) -> Vec<Arc<V>> {
@@ -109,6 +111,7 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> Shard<K, V, P> {
         self.free.clear();
         self.policy.clear();
         self.evicted.clear();
+
         self.slab.drain(..).flatten().map(|e| e.value).collect() // let the caller drop the individual values after unlocking to avoid deadlocks
     }
 
@@ -118,8 +121,17 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> Shard<K, V, P> {
     pub(crate) fn capacity(&self) -> usize {
         self.policy.capacity()
     }
-    pub(crate) fn set_capacity(&mut self, capacity: usize) {
-        todo!()
+    pub(crate) fn set_capacity(&mut self, capacity: usize, dropped: &mut Vec<Arc<V>>) {
+        self.policy.set_capacity(capacity, &mut self.evicted);
+        let mut evicted = std::mem::take(&mut self.evicted);
+
+        evicted
+            .drain(..)
+            .map(|e| self.remove_slot(e))
+            .flatten()
+            .for_each(|e| dropped.push(e.value));
+
+        self.evicted = evicted;
     }
 
     /// Frees slot `id`: slab, free list and table. Does NOT notify the policy:
@@ -130,6 +142,7 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> Shard<K, V, P> {
         self.free.push(id.index() as u32);
         let removed = self.table.remove(&entry.key);
         debug_assert_eq!(removed, Some(id), "table and slab disagree");
+
         Some(entry)
     }
 }
