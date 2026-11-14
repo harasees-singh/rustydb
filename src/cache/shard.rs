@@ -26,7 +26,7 @@ pub(crate) struct Shard<K, V, P> {
     evicted: Vec<EntryId>,
 }
 
-impl<K: Hash + Eq + Clone + Copy, V, P: EvictionPolicy> Shard<K, V, P> {
+impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> Shard<K, V, P> {
     pub(crate) fn new(capacity: usize) -> Self {
         Shard {
             table: HashMap::new(),
@@ -37,36 +37,61 @@ impl<K: Hash + Eq + Clone + Copy, V, P: EvictionPolicy> Shard<K, V, P> {
         }
     }
 
-    pub(crate) fn insert(&mut self, hash: u64, key: K, value: V, charge: usize) -> Arc<V> {
-        // first cleanup an existing key
-        let v = Arc::new(value);
-        let existing = self.table.get(&key).copied();
-        if let Some(existing) = existing {
-            self.remove_slot(existing);
-            self.policy.remove(existing);
+    /// Inserts `value` under `key` and returns a shared reference to it.
+    ///
+    /// Values removed to make room (the entry this one replaces, and anything
+    /// the policy evicts, which can include the new entry itself if it is
+    /// rejected) are appended to `dropped`. The caller must drop them after
+    /// releasing the shard's lock, so no `Drop` runs while it is held.
+    pub(crate) fn insert(
+        &mut self,
+        hash: u64,
+        key: K,
+        value: V,
+        charge: usize,
+        dropped: &mut Vec<Arc<V>>,
+    ) -> Arc<V> {
+        let value = Arc::new(value);
+
+        // Replace an existing entry for this key, if there is one.
+        if let Some(old) = self.table.get(&key).copied() {
+            self.policy.remove(old);
+            if let Some(entry) = self.remove_slot(old) {
+                dropped.push(entry.value);
+            }
         }
-        let free = self.free.pop();
-        let entry = Option::from(Entry {
+
+        // Put the new entry in a free slot, or grow the slab.
+        let entry = Some(Entry {
             key: key.clone(),
-            value: Arc::clone(&v),
+            value: Arc::clone(&value),
             charge,
             hash,
         });
-        let mut idx = self.slab.len();
-        if let Some(free_idx) = free {
-            idx = free_idx as usize;
-        } else {
-            self.slab.push(None);
-        }
-        self.slab[idx] = entry;
-        let entry_id = EntryId::new(idx as u32);
-        self.table.insert(key, entry_id.clone());
-        self.policy.insert(entry_id, hash, charge, self.evicted.as_mut());
+        let idx = match self.free.pop() {
+            Some(i) => {
+                self.slab[i as usize] = entry;
+                i as usize
+            }
+            None => {
+                self.slab.push(entry);
+                self.slab.len() - 1
+            }
+        };
+        let id = EntryId::new(idx as u32);
+        self.table.insert(key, id);
+
+        // Let the policy make room, then remove whatever it evicted.
         let mut evicted = std::mem::take(&mut self.evicted);
+        self.policy.insert(id, hash, charge, &mut evicted);
         for evict in evicted.drain(..) {
-            self.remove_slot(evict);
+            if let Some(entry) = self.remove_slot(evict) {
+                dropped.push(entry.value);
+            }
         }
-        v
+        self.evicted = evicted; // drained, so this keeps the buffer's capacity for next time
+
+        value
     }
     pub(crate) fn get(&mut self, hash: u64, key: &K) -> Option<Arc<V>> {
         let entry_id = self.table.get(key)?;
