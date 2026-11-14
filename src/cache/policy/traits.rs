@@ -27,7 +27,7 @@ pub trait EvictionPolicy: Send {
     /// itself when the newcomer is rejected, either because its `charge` is
     /// larger than the whole capacity or because the policy judges existing
     /// entries more valuable.
-    fn insert(&mut self, id: EntryId, hash: u64, charge: usize, evicted: &mut Vec<EntryId>);
+    fn insert(&mut self, id: EntryId, hash: u64, charge: usize, evicted: &mut Vec<EntryId>) -> bool;
 
     /// Records a cache hit on `id`.
     fn access(&mut self, id: EntryId, hash: u64);

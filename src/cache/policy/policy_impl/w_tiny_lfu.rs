@@ -10,7 +10,7 @@ impl EvictionPolicy for WTinyLFUEvictionPolicy {
         todo!()
     }
 
-    fn insert(&mut self, id: EntryId, hash: u64, charge: usize, evicted: &mut Vec<EntryId>) {
+    fn insert(&mut self, id: EntryId, hash: u64, charge: usize, evicted: &mut Vec<EntryId>) -> bool {
         todo!()
     }
 
