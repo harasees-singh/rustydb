@@ -59,7 +59,9 @@ mod tests {
     const POLICY: BloomFilterPolicy = BloomFilterPolicy {};
 
     fn make_keys(n: usize, prefix: &str) -> Vec<Vec<u8>> {
-        (0..n).map(|i| format!("{prefix}-{i}").into_bytes()).collect()
+        (0..n)
+            .map(|i| format!("{prefix}-{i}").into_bytes())
+            .collect()
     }
 
     fn build(keys: &[Vec<u8>]) -> Vec<u8> {
@@ -111,7 +113,10 @@ mod tests {
             .iter()
             .filter(|k| POLICY.key_may_match(k, &filter))
             .count();
-        assert!(hits < probes / 200, "false positive rate too high: {hits}/{probes}");
+        assert!(
+            hits < probes / 200,
+            "false positive rate too high: {hits}/{probes}"
+        );
     }
 
     #[test]
@@ -132,7 +137,13 @@ mod tests {
 
     #[test]
     fn handles_empty_binary_and_duplicate_keys() {
-        let keys = vec![vec![], vec![0x00], vec![0xff, 0xff], vec![0x00, 0x01, 0x02], vec![0x00]];
+        let keys = vec![
+            vec![],
+            vec![0x00],
+            vec![0xff, 0xff],
+            vec![0x00, 0x01, 0x02],
+            vec![0x00],
+        ];
         let filter = build(&keys);
         for key in &keys {
             assert!(POLICY.key_may_match(key, &filter), "key={key:?}");
