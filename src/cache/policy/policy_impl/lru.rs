@@ -4,6 +4,7 @@ use crate::cache::policy::{EntryId, EvictionPolicy};
 const NIL: u32 = u32::MAX;
 
 /// Least-recently-used eviction.
+#[derive(Clone)]
 struct Node {
     prev: u32,
     next: u32,
@@ -43,8 +44,9 @@ impl EvictionPolicy for LRUEvictionPolicy {
         }
     }
 
-    fn insert(&mut self, id: EntryId, hash: u64, charge: usize, evicted: &mut Vec<EntryId>) -> bool {
+    fn insert(&mut self, id: EntryId, _hash: u64, charge: usize, evicted: &mut Vec<EntryId>) -> bool {
         if charge > self.capacity {
+            evicted.push(id);
             return false;
         }
         while self.charge + charge > self.capacity {
@@ -54,13 +56,13 @@ impl EvictionPolicy for LRUEvictionPolicy {
         }
         let node = Node::new(NIL, self.head, charge, true);
         if id.index() >= self.nodes.len() {
-            self.nodes.push(node)
+            self.nodes.resize(id.index() + 1, Node::new(NIL, NIL, charge, true));
         }
         else {
             self.nodes[id.index()] = node;
         }
         self.promote(id);
-        self.capacity += charge;
+        self.charge += charge;
 
         true
     }
@@ -82,7 +84,7 @@ impl EvictionPolicy for LRUEvictionPolicy {
     }
 
     fn set_capacity(&mut self, capacity: usize, evicted: &mut Vec<EntryId>) {
-        while self.capacity > capacity {
+        while self.charge > capacity {
             let entry = EntryId::new(self.tail);
             self.remove(entry);
             evicted.push(entry);
@@ -117,6 +119,7 @@ impl LRUEvictionPolicy {
         }
         self.nodes[i as usize].prev = NIL;
         self.nodes[i as usize].next = NIL;
+        self.nodes[i as usize].in_list = false;
     }
 
     /// Links the detached node `i` at the head, as the most recently used.
