@@ -45,23 +45,26 @@ impl EvictionPolicy for LRUEvictionPolicy {
     }
 
     fn insert(&mut self, id: EntryId, _hash: u64, charge: usize, evicted: &mut Vec<EntryId>) -> bool {
+        // Can never fit: reject it without touching any state.
         if charge > self.capacity {
             evicted.push(id);
             return false;
         }
-        while self.charge + charge > self.capacity {
-            let entry = EntryId::new(self.tail);
-            self.remove(entry);
-            evicted.push(entry);
+
+        // Make room first, so the total never goes over capacity.
+        let limit = self.capacity - charge;
+        self.evict_until(limit, evicted);
+
+        // Track the new entry as the most recently used.
+        let i = id.index();
+        if i >= self.nodes.len() {
+            // Slots below `i` that were never used (their ids were rejected)
+            // are vacant.
+            self.nodes.resize_with(i + 1, || Node::new(NIL, NIL, 0, false));
         }
-        let node = Node::new(NIL, self.head, charge, true);
-        if id.index() >= self.nodes.len() {
-            self.nodes.resize(id.index() + 1, Node::new(NIL, NIL, charge, true));
-        }
-        else {
-            self.nodes[id.index()] = node;
-        }
-        self.promote(id);
+        debug_assert!(!self.nodes[i].in_list, "id inserted twice");
+        self.nodes[i] = Node::new(NIL, NIL, charge, true);
+        self.push_front(i as u32);
         self.charge += charge;
 
         true
@@ -72,8 +75,11 @@ impl EvictionPolicy for LRUEvictionPolicy {
     }
 
     fn remove(&mut self, id: EntryId) {
-        self.charge -= self.nodes[id.index()].charge;
-        self.unlink(id.index() as u32);
+        let tracked = self.nodes.get(id.index()).is_some_and(|n| n.in_list);
+        debug_assert!(tracked, "removing an untracked id");
+        if tracked {
+            self.untrack(id.index() as u32);
+        }
     }
 
     fn clear(&mut self) {
@@ -84,12 +90,8 @@ impl EvictionPolicy for LRUEvictionPolicy {
     }
 
     fn set_capacity(&mut self, capacity: usize, evicted: &mut Vec<EntryId>) {
-        while self.charge > capacity {
-            let entry = EntryId::new(self.tail);
-            self.remove(entry);
-            evicted.push(entry);
-        }
         self.capacity = capacity;
+        self.evict_until(capacity, evicted);
     }
 
     fn charge(&self) -> usize {
@@ -102,9 +104,33 @@ impl EvictionPolicy for LRUEvictionPolicy {
 }
 
 impl LRUEvictionPolicy {
+    /// Stops tracking node `i`: detaches it, subtracts its charge and marks
+    /// the slot vacant.
+    fn untrack(&mut self, i: u32) {
+        self.unlink(i);
+        let node = &mut self.nodes[i as usize];
+        self.charge -= node.charge;
+        node.charge = 0;
+        node.in_list = false;
+    }
+
+    /// Evicts from the least-recently-used end, appending each victim to
+    /// `evicted`, until the total charge is at most `limit`.
+    fn evict_until(&mut self, limit: usize, evicted: &mut Vec<EntryId>) {
+        while self.charge > limit {
+            let victim = self.tail;
+            debug_assert!(victim != NIL, "over the limit but the list is empty");
+            if victim == NIL {
+                break;
+            }
+            self.untrack(victim);
+            evicted.push(EntryId::new(victim));
+        }
+    }
+
     /// Detaches node `i` from the list, fixing its neighbours and, if it was
-    /// the first or last node, `head` or `tail`. Does not touch `charge` or
-    /// `in_list`: the callers own those.
+    /// the first or last node, `head` or `tail`, and marks it not linked.
+    /// Does not touch `charge`: the callers own that.
     fn unlink(&mut self, i: u32) {
         let (p, n) = (self.nodes[i as usize].prev, self.nodes[i as usize].next);
         if p != NIL {
@@ -127,6 +153,7 @@ impl LRUEvictionPolicy {
         let old_head = self.head;
         self.nodes[i as usize].prev = NIL;
         self.nodes[i as usize].next = old_head;
+        self.nodes[i as usize].in_list = true; // `in_list` means "currently linked"
         if old_head != NIL {
             self.nodes[old_head as usize].prev = i;
         } else {

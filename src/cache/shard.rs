@@ -1,10 +1,14 @@
 //! One shard of the cache: the single-threaded core that does the real work.
 //!
-//! Plan: a hash table from key to `EntryId` keyed by the precomputed hash, a
-//! slab of entries holding key, `Arc<V>` and charge, and one `EvictionPolicy`.
-//! `insert`, `get`, `erase` and `prune` update all three together, and every id
-//! the policy reports as evicted is removed from the table and the slab. The
-//! whole shard sits behind one `Mutex` in `ShardedCache`.
+//! Three structures are kept in step: a `HashMap` from key to `EntryId`, a slab
+//! of entries (key and `Arc<V>`) addressed by `EntryId`, and one
+//! `EvictionPolicy`, which tracks only ids and charges. `insert`, `get`,
+//! `erase`, `set_capacity` and `prune` update all three, and every id the
+//! policy reports as evicted is removed from the table and the slab.
+//!
+//! Every value the shard removes is handed back to the caller instead of being
+//! dropped here, so that no `Drop` runs while the shard's lock is held. The
+//! shard sits behind one `Mutex` in `ShardedCache`.
 
 use crate::cache::policy::{EntryId, EvictionPolicy};
 use std::collections::HashMap;
@@ -14,8 +18,6 @@ use std::sync::Arc;
 struct Entry<K, V> {
     key: K,
     value: Arc<V>,
-    charge: usize,
-    hash: u64, // kept so the table can be rebuilt or rehashed without recomputing it
 }
 
 pub(crate) struct Shard<K, V, P> {
@@ -65,8 +67,6 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> Shard<K, V, P> {
         let entry = Some(Entry {
             key: key.clone(),
             value: Arc::clone(&value),
-            charge,
-            hash,
         });
         let idx = match self.free.pop() {
             Some(i) => {
@@ -83,7 +83,15 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> Shard<K, V, P> {
 
         // Let the policy make room, then remove whatever it evicted.
         let mut evicted = std::mem::take(&mut self.evicted);
-        self.policy.insert(id, hash, charge, &mut evicted);
+        let admitted = self.policy.insert(id, hash, charge, &mut evicted);
+        // Contract: a rejected id is reported through `evicted` as well, so the
+        // loop below removes it. A policy that returned `false` without doing so
+        // would leave an untracked entry behind.
+        debug_assert_eq!(
+            admitted,
+            !evicted.contains(&id),
+            "policy rejected the entry without reporting it as evicted"
+        );
         for evict in evicted.drain(..) {
             if let Some(entry) = self.remove_slot(evict) {
                 dropped.push(entry.value);
@@ -100,7 +108,7 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> Shard<K, V, P> {
 
         Some(Arc::clone(&entry.value))
     }
-    pub(crate) fn erase(&mut self, hash: u64, key: &K) -> Option<Arc<V>> {
+    pub(crate) fn erase(&mut self, _hash: u64, key: &K) -> Option<Arc<V>> {
         let entry_id = self.table.get(key)?;
         self.policy.remove(*entry_id);
 
