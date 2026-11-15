@@ -50,6 +50,10 @@ pub trait Cache<K, V>: Send + Sync {
     fn capacity(&self) -> usize;
 
     /// Changes the capacity, evicting immediately if the cache is now over it.
+    ///
+    /// Safe to call from any thread, but implementations that resize in several
+    /// steps (such as a sharded cache) may leave the cache with mixed limits if
+    /// two calls overlap, so callers should not call it concurrently.
     fn set_capacity(&self, capacity: usize);
 
     /// Returns an id that has never been returned by this cache before.
