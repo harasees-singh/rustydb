@@ -91,11 +91,9 @@ impl<K: Eq + Hash + Clone + Send, V: Send + Sync, P: EvictionPolicy> Cache<K, V>
     }
 
     fn prune(&self) {
-        let mut dropped: Vec<Arc<V>> = Vec::new();
-        self.shards
-            .iter()
-            .flat_map(|shard| shard.lock().unwrap().prune())
-            .for_each(|v| dropped.push(v));
+        for shard in &self.shards {
+            let _values = shard.lock().unwrap().prune();
+        }
     }
 
     fn total_charge(&self) -> usize {
@@ -112,13 +110,13 @@ impl<K: Eq + Hash + Clone + Send, V: Send + Sync, P: EvictionPolicy> Cache<K, V>
     // Callers should serialize calls to this method.
     fn set_capacity(&self, capacity: usize) {
         let capacity_per_shard = per_shard(capacity);
-        let mut dropped: Vec<Arc<V>> = Vec::new();
-        self.shards.iter().for_each(|shard| {
+        for shard in &self.shards {
+            let mut dropped: Vec<Arc<V>> = Vec::new();
             shard
                 .lock()
                 .unwrap()
-                .set_capacity(capacity_per_shard, &mut dropped)
-        });
+                .set_capacity(capacity_per_shard, &mut dropped);
+        }
         self.capacity.store(capacity, Ordering::Relaxed);
     }
 
