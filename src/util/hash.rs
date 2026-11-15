@@ -1,8 +1,13 @@
-use xxhash_rust::xxh3::xxh3_64;
+use std::hash::{BuildHasher, Hash};
+use xxhash_rust::xxh3::{xxh3_64, Xxh3DefaultBuilder};
 
 // hashing as fast as the memory bus can feed
 pub(crate) fn hash(data: &[u8]) -> u64 {
     xxh3_64(data)
+}
+
+pub(crate) fn hash_key<K: Hash>(key: K) -> u64 {
+    Xxh3DefaultBuilder.hash_one(key)
 }
 
 #[cfg(test)]
