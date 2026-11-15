@@ -44,7 +44,13 @@ impl EvictionPolicy for LRUEvictionPolicy {
         }
     }
 
-    fn insert(&mut self, id: EntryId, _hash: u64, charge: usize, evicted: &mut Vec<EntryId>) -> bool {
+    fn insert(
+        &mut self,
+        id: EntryId,
+        _hash: u64,
+        charge: usize,
+        evicted: &mut Vec<EntryId>,
+    ) -> bool {
         // Can never fit: reject it without touching any state.
         if charge > self.capacity {
             evicted.push(id);
@@ -60,7 +66,8 @@ impl EvictionPolicy for LRUEvictionPolicy {
         if i >= self.nodes.len() {
             // Slots below `i` that were never used (their ids were rejected)
             // are vacant.
-            self.nodes.resize_with(i + 1, || Node::new(NIL, NIL, 0, false));
+            self.nodes
+                .resize_with(i + 1, || Node::new(NIL, NIL, 0, false));
         }
         debug_assert!(!self.nodes[i].in_list, "id inserted twice");
         self.nodes[i] = Node::new(NIL, NIL, charge, true);
@@ -241,7 +248,11 @@ mod tests {
 
         for (i, node) in p.nodes.iter().enumerate() {
             if !node.in_list {
-                assert_eq!((node.prev, node.next, node.charge), (NIL, NIL, 0), "vacant node {i} is dirty");
+                assert_eq!(
+                    (node.prev, node.next, node.charge),
+                    (NIL, NIL, 0),
+                    "vacant node {i} is dirty"
+                );
             }
         }
 

@@ -164,7 +164,12 @@ mod tests {
     type TestShard = Shard<u32, u32, LRUEvictionPolicy>;
 
     /// Inserts and returns the new value and everything the shard handed back.
-    fn put(s: &mut TestShard, key: u32, value: u32, charge: usize) -> (Arc<u32>, Vec<u32>, Vec<Arc<u32>>) {
+    fn put(
+        s: &mut TestShard,
+        key: u32,
+        value: u32,
+        charge: usize,
+    ) -> (Arc<u32>, Vec<u32>, Vec<Arc<u32>>) {
         let mut dropped = Vec::new();
         let v = s.insert(key as u64, key, value, charge, &mut dropped);
         check(s);
@@ -198,7 +203,9 @@ mod tests {
         let live: Vec<usize> = (0..s.slab.len()).filter(|&i| s.slab[i].is_some()).collect();
         assert_eq!(s.table.len(), live.len(), "table and slab sizes differ");
         for (key, id) in &s.table {
-            let entry = s.slab[id.index()].as_ref().expect("table points at an empty slot");
+            let entry = s.slab[id.index()]
+                .as_ref()
+                .expect("table points at an empty slot");
             assert_eq!(&entry.key, key);
         }
 
@@ -206,8 +213,15 @@ mod tests {
         free.sort();
         free.dedup();
         assert_eq!(free.len(), s.free.len(), "duplicate slot in the free list");
-        assert!(free.iter().all(|&i| s.slab[i as usize].is_none()), "free slot is occupied");
-        assert_eq!(free.len() + live.len(), s.slab.len(), "a slot is neither live nor free");
+        assert!(
+            free.iter().all(|&i| s.slab[i as usize].is_none()),
+            "free slot is occupied"
+        );
+        assert_eq!(
+            free.len() + live.len(),
+            s.slab.len(),
+            "a slot is neither live nor free"
+        );
 
         assert!(s.evicted.is_empty(), "scratch buffer was not drained");
         assert!(s.total_charge() <= s.capacity());
@@ -475,7 +489,11 @@ mod tests {
         }
         drop(s.insert(2, 2, Counted(drops.clone()), 1, &mut dropped));
         assert_eq!(dropped.len(), 1);
-        assert_eq!(drops.load(Ordering::SeqCst), 0, "evicted value dropped under the lock");
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "evicted value dropped under the lock"
+        );
         dropped.clear();
         assert_eq!(drops.load(Ordering::SeqCst), 1);
 

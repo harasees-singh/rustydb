@@ -31,7 +31,8 @@ pub trait EvictionPolicy: Send {
     /// Returns `false` if `id` was rejected and is not tracked. A rejected id
     /// is also appended to `evicted`, so a caller that only processes `evicted`
     /// stays correct, and the return value is a convenience.
-    fn insert(&mut self, id: EntryId, hash: u64, charge: usize, evicted: &mut Vec<EntryId>) -> bool;
+    fn insert(&mut self, id: EntryId, hash: u64, charge: usize, evicted: &mut Vec<EntryId>)
+    -> bool;
 
     /// Records a cache hit on `id`.
     fn access(&mut self, id: EntryId, hash: u64);

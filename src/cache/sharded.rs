@@ -5,16 +5,16 @@
 //! capacity is split across shards, rounded up so the shards add up to at
 //! least the requested capacity. `new_id` is an `AtomicU64` counter.
 
-use std::hash::Hash;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use crate::cache::Cache;
 use crate::cache::policy::EvictionPolicy;
 use crate::cache::shard::Shard;
+use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 const SHARD_BITS: u32 = 4;
 const NUM_SHARDS: usize = 1 << SHARD_BITS;
-pub struct ShardedCache <K, V, P> {
+pub struct ShardedCache<K, V, P> {
     shards: Vec<Mutex<Shard<K, V, P>>>,
     capacity: AtomicUsize,
     last_id: AtomicU64,
@@ -23,7 +23,9 @@ pub struct ShardedCache <K, V, P> {
 impl<K: Eq + Hash + Clone + Send, V: Send + Sync, P: EvictionPolicy> ShardedCache<K, V, P> {
     pub fn new(capacity: usize) -> Self {
         ShardedCache {
-            shards: (0..NUM_SHARDS).map(|_| Mutex::new(Shard::new((capacity + NUM_SHARDS - 1)/NUM_SHARDS))).collect(),
+            shards: (0..NUM_SHARDS)
+                .map(|_| Mutex::new(Shard::new((capacity + NUM_SHARDS - 1) / NUM_SHARDS)))
+                .collect(),
             capacity: AtomicUsize::new(capacity),
             last_id: AtomicU64::new(0),
         }
@@ -38,11 +40,17 @@ impl<K: Eq + Hash + Clone + Send, V: Send + Sync, P: EvictionPolicy> ShardedCach
     }
 }
 
-impl<K: Eq + Hash + Clone + Send, V: Send + Sync, P: EvictionPolicy> Cache<K, V> for ShardedCache<K, V, P> {
+impl<K: Eq + Hash + Clone + Send, V: Send + Sync, P: EvictionPolicy> Cache<K, V>
+    for ShardedCache<K, V, P>
+{
     fn insert(&self, key: K, value: V, charge: usize) -> Arc<V> {
         let mut dropped: Vec<Arc<V>> = Vec::new();
         let hash = self.hash_key(&key);
-        let v = self.shard_for(hash).lock().unwrap().insert(hash, key, value, charge, &mut dropped);
+        let v = self
+            .shard_for(hash)
+            .lock()
+            .unwrap()
+            .insert(hash, key, value, charge, &mut dropped);
         // lock is released because we don't have any reference to it so we can drop safely
         drop(dropped); // this line is not really needed, added for the visual appeal
         v
@@ -55,18 +63,20 @@ impl<K: Eq + Hash + Clone + Send, V: Send + Sync, P: EvictionPolicy> Cache<K, V>
 
     fn erase(&self, key: &K) {
         let hash = self.hash_key(&key);
-        let _ = self.shard_for(hash).lock().unwrap().erase(hash, key);
+        let removed = self.shard_for(hash).lock().unwrap().erase(hash, key);
     }
 
     fn prune(&self) {
         let mut dropped: Vec<Arc<V>> = Vec::new();
-        self.shards.iter()
+        self.shards
+            .iter()
             .flat_map(|shard| shard.lock().unwrap().prune())
             .for_each(|v| dropped.push(v));
     }
 
     fn total_charge(&self) -> usize {
-        self.shards.iter()
+        self.shards
+            .iter()
             .map(|shard| shard.lock().unwrap().total_charge())
             .sum()
     }
@@ -78,8 +88,12 @@ impl<K: Eq + Hash + Clone + Send, V: Send + Sync, P: EvictionPolicy> Cache<K, V>
     fn set_capacity(&self, capacity: usize) {
         let capacity_per_shard = (capacity + NUM_SHARDS - 1) / NUM_SHARDS;
         let mut dropped: Vec<Arc<V>> = Vec::new();
-        self.shards.iter()
-            .for_each(|shard| shard.lock().unwrap().set_capacity(capacity_per_shard, &mut dropped))
+        self.shards.iter().for_each(|shard| {
+            shard
+                .lock()
+                .unwrap()
+                .set_capacity(capacity_per_shard, &mut dropped)
+        })
     }
 
     fn new_id(&self) -> u64 {
