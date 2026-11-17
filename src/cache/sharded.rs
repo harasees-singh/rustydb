@@ -166,8 +166,7 @@ mod tests {
 
     #[test]
     fn can_be_used_as_a_shared_trait_object() {
-        let cache: Arc<dyn Cache<u32, String>> =
-            Arc::new(TestCache::<String>::new(100));
+        let cache: Arc<dyn Cache<u32, String>> = Arc::new(TestCache::<String>::new(100));
         let other = Arc::clone(&cache);
         std::thread::spawn(move || {
             other.insert(1, "one".to_string(), 1);
@@ -264,7 +263,9 @@ mod tests {
     #[test]
     fn eviction_is_per_shard() {
         let cache = TestCache::<u32>::new(32); // 2 per shard
-        let [a, b, c] = keys_in_shard(3, 3)[..] else { unreachable!() };
+        let [a, b, c] = keys_in_shard(3, 3)[..] else {
+            unreachable!()
+        };
         let d = keys_in_shard(5, 1)[0];
 
         cache.insert(a, 1, 1);
@@ -282,7 +283,9 @@ mod tests {
     #[test]
     fn get_makes_an_entry_recently_used() {
         let cache = TestCache::<u32>::new(32);
-        let [a, b, c] = keys_in_shard(7, 3)[..] else { unreachable!() };
+        let [a, b, c] = keys_in_shard(7, 3)[..] else {
+            unreachable!()
+        };
         cache.insert(a, 1, 1);
         cache.insert(b, 2, 1);
         assert!(cache.get(&a).is_some());
