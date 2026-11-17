@@ -1,5 +1,7 @@
 pub mod cache;
 pub mod comparator;
-mod error;
+pub mod error;
 pub mod filter;
 pub mod util;
+
+pub use error::{Error, Result};
