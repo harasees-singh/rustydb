@@ -18,6 +18,7 @@
 //! offset is bounds-checked, and damage is reported as
 //! [`Error::Corruption`](crate::Error::Corruption), never as a panic.
 
+use std::fmt::Display;
 use crate::comparator::Comparator;
 use std::range::Range;
 use std::sync::Arc;
@@ -123,10 +124,11 @@ impl crate::iterator::traits::Cursor for BlockIter {
     fn seek_to_first(&mut self) {
         self.current = 0;
         self.restart_index = 0;
+
         self.key.clear();
         self.value.end = 0;
 
-        self.next();
+
     }
 
     fn seek_to_last(&mut self) {
@@ -139,18 +141,20 @@ impl crate::iterator::traits::Cursor for BlockIter {
 
     fn next(&mut self) {
         self.current = self.value.end;
-        let mut key: Vec<u8> = Vec::new();
-        let mut value: Range<usize> = Range::default();
-
         // read the current entry
-        self.read(self.current, self.key.clone(), &mut key, &mut value);
-
-        self.key = key;
-        self.value = value;
+        if !self.read(self.current) {
+            self.status = Err(crate::Error::corruption(format!("bad entry, unable to read block data at index {}", self.current)));
+        }
     }
 
     fn prev(&mut self) {
-        todo!()
+        let current = self.current;
+
+        self.current = self.restart_index;
+        while self.value.end < current {
+            self.next();
+        }
+        assert_eq!(self.value.end, current);
     }
 
     fn key(&self) -> &[u8] {
@@ -167,7 +171,7 @@ impl crate::iterator::traits::Cursor for BlockIter {
 }
 
 impl BlockIter {
-    fn read(&mut self, current: usize, prev_key: Vec<u8>, key: &mut Vec<u8>, value: &mut Range<usize>) -> bool {
+    fn read(&mut self, current: usize) -> bool {
         let mut data = &self.block.data[current..];
         let mut common_bytes_for_key = 0u32;
         if !crate::util::coding::get_varint32(&mut data, &mut common_bytes_for_key) {
@@ -187,12 +191,12 @@ impl BlockIter {
             self.restart_index = current;
         }
 
-        key.extend_from_slice(&prev_key[0..common_bytes_for_key as usize]);
-        key.extend_from_slice(&data[0..new_bytes_for_key as usize]);
+        self.key.truncate(common_bytes_for_key as usize);
+        self.key.extend_from_slice(&data[0..new_bytes_for_key as usize]);
 
-        value.start = self.block.data.len() - data.len() + new_bytes_for_key as usize;
-        value.end = value.start + value_bytes as usize;
+        self.value.start = self.block.data.len() - data.len() + new_bytes_for_key as usize;
+        self.value.end = self.value.start + value_bytes as usize;
 
-        value.end <= self.block.restarts_offset
+        true
     }
 }
