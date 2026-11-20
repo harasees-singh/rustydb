@@ -18,11 +18,11 @@
 //! offset is bounds-checked, and damage is reported as
 //! [`Error::Corruption`](crate::Error::Corruption), never as a panic.
 
-use std::fmt::Display;
 use crate::comparator::Comparator;
+use crate::iterator::traits::Cursor;
+use std::fmt::Display;
 use std::range::Range;
 use std::sync::Arc;
-use crate::iterator::traits::Cursor;
 
 /// An immutable, validated block.
 ///
@@ -132,11 +132,22 @@ impl crate::iterator::traits::Cursor for BlockIter {
     }
 
     fn seek_to_last(&mut self) {
-        todo!()
+        if self.block.restarts_count == 0 {
+            // No restart points, so nothing to start decoding from.
+            self.current = self.block.restarts_offset;
+            return;
+        }
+
+        // The last entry is in the last restart interval: start there and read
+        // forward to the entry that ends where the entries end.
+        self.seek_to_restart_point(self.block.restarts_count as usize - 1);
+        self.scan_until(self.block.restarts_offset);
     }
 
     fn seek(&mut self, target: &[u8]) {
-        todo!()
+        while self.key.as_slice() < target && self.current < self.block.restarts_offset {
+            self.next();
+        }
     }
 
     fn next(&mut self) {
@@ -147,7 +158,10 @@ impl crate::iterator::traits::Cursor for BlockIter {
         }
         // read the current entry
         if !self.read(self.current) {
-            self.status = Err(crate::Error::corruption(format!("bad entry, unable to read block data at index {}", self.current)));
+            self.status = Err(crate::Error::corruption(format!(
+                "bad entry, unable to read block data at index {}",
+                self.current
+            )));
         }
     }
 
@@ -166,17 +180,10 @@ impl crate::iterator::traits::Cursor for BlockIter {
             self.restart_index -= 1;
         }
 
-        // Start just before that restart point, then read forward until the next
-        // entry would be the original one.
-        self.key.clear();
-        let start = self.restart_point(self.restart_index);
-        self.value = Range::from(start..start);
-        loop {
-            self.next();
-            if !self.valid() || self.value.end >= original {
-                break;
-            }
-        }
+        // Start there and read forward until the next entry would be the
+        // original one.
+        self.seek_to_restart_point(self.restart_index);
+        self.scan_until(original);
         if self.valid() && self.value.end != original {
             self.status = Err(crate::Error::corruption(
                 "bad entry, unable to find the entry before the current one",
@@ -185,15 +192,15 @@ impl crate::iterator::traits::Cursor for BlockIter {
     }
 
     fn key(&self) -> &[u8] {
-        todo!()
+        self.key.as_slice()
     }
 
     fn value(&self) -> &[u8] {
-        todo!()
+        self.block.data[self.value.clone()].as_ref()
     }
 
     fn status(&self) -> crate::Result<()> {
-        todo!()
+        self.status.clone()
     }
 }
 
@@ -241,6 +248,27 @@ impl BlockIter {
         }
 
         true
+    }
+
+    /// Positions the cursor just before restart point `i`, so that the next call
+    /// to `next()` reads the entry stored there. The key starts empty, which is
+    /// right because a restart entry stores its whole key.
+    fn seek_to_restart_point(&mut self, i: usize) {
+        self.restart_index = i;
+        self.key.clear();
+        let start = self.restart_point(i);
+        self.value = Range::from(start..start);
+    }
+
+    /// Reads forward until the current entry ends at or after `limit`, or the
+    /// cursor becomes invalid (end of the block, or an error).
+    fn scan_until(&mut self, limit: usize) {
+        loop {
+            self.next();
+            if !self.valid() || self.value.end >= limit {
+                break;
+            }
+        }
     }
 
     /// The offset of the entry stored at restart point `i`.
