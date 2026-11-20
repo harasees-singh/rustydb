@@ -88,7 +88,7 @@ impl Block {
         BlockIter {
             block: Arc::clone(self),
             cmp,
-            current: 0,
+            current: self.restarts_offset, // not positioned on any entry yet
             restart_index: 0,
             key: Vec::new(),
             value: Range::from(0..0),
