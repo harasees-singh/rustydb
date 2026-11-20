@@ -47,12 +47,34 @@ impl Block {
     /// not fit in it. Only the trailer is checked here. Individual entries are
     /// checked when an iterator decodes them.
     pub fn new(data: Vec<u8>) -> crate::Result<Block> {
-        todo!()
+        // restarts_count is the last 4 bytes written in little endian
+        let len = data.len();
+
+        if len < 4 {
+            return Err(crate::Error::corruption(
+                "data doesn't conform to minimum possible size of 4 bytes",
+            ));
+        }
+
+        let c = u32::from_le_bytes(data[len - 4..].try_into().unwrap());
+
+        // check if restarts array fits data
+        if len < 4 + 4 * c as usize {
+            return Err(crate::Error::corruption(
+                "data doesn't have enough space for restarts array",
+            ));
+        }
+
+        Ok(Block {
+            data,
+            restarts_offset: len - 4 - 4 * c as usize,
+            restarts_count: c,
+        })
     }
 
     /// The size of the block in bytes, used as its cost in the block cache.
     pub fn size(&self) -> usize {
-        todo!()
+        self.data.len()
     }
 
     /// Creates a cursor over the block, which starts out not positioned on any
@@ -95,11 +117,16 @@ pub struct BlockIter {
 /// [`Cursor`](crate::iterator::traits::Cursor) for the contract of each method.
 impl crate::iterator::traits::Cursor for BlockIter {
     fn valid(&self) -> bool {
-        todo!()
+        self.status.is_ok() && self.current < self.block.restarts_offset
     }
 
     fn seek_to_first(&mut self) {
-        todo!()
+        self.current = 0;
+        self.restart_index = 0;
+        self.key.clear();
+        self.value.end = 0;
+
+        self.next();
     }
 
     fn seek_to_last(&mut self) {
@@ -111,7 +138,15 @@ impl crate::iterator::traits::Cursor for BlockIter {
     }
 
     fn next(&mut self) {
-        todo!()
+        self.current = self.value.end;
+        let mut key: Vec<u8> = Vec::new();
+        let mut value: Range<usize> = Range::default();
+
+        // read the current entry
+        self.read(self.current, self.key.clone(), &mut key, &mut value);
+
+        self.key = key;
+        self.value = value;
     }
 
     fn prev(&mut self) {
@@ -128,5 +163,36 @@ impl crate::iterator::traits::Cursor for BlockIter {
 
     fn status(&self) -> crate::Result<()> {
         todo!()
+    }
+}
+
+impl BlockIter {
+    fn read(&mut self, current: usize, prev_key: Vec<u8>, key: &mut Vec<u8>, value: &mut Range<usize>) -> bool {
+        let mut data = &self.block.data[current..];
+        let mut common_bytes_for_key = 0u32;
+        if !crate::util::coding::get_varint32(&mut data, &mut common_bytes_for_key) {
+            return false;
+        }
+        let mut new_bytes_for_key = 0u32;
+        if !crate::util::coding::get_varint32(&mut data, &mut new_bytes_for_key) {
+            return false;
+        }
+        let mut value_bytes = 0u32;
+        if !crate::util::coding::get_varint32(&mut data, &mut value_bytes) {
+            return false;
+        }
+
+        // update restart_index so that prev() can start from this index and avoid looking up the restart_offsets for the closest entry
+        if common_bytes_for_key == 0 {
+            self.restart_index = current;
+        }
+
+        key.extend_from_slice(&prev_key[0..common_bytes_for_key as usize]);
+        key.extend_from_slice(&data[0..new_bytes_for_key as usize]);
+
+        value.start = self.block.data.len() - data.len() + new_bytes_for_key as usize;
+        value.end = value.start + value_bytes as usize;
+
+        value.end <= self.block.restarts_offset
     }
 }
