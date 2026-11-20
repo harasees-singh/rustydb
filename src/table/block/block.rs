@@ -20,7 +20,7 @@
 
 use crate::comparator::Comparator;
 use crate::iterator::traits::Cursor;
-use std::fmt::Display;
+use std::cmp::Ordering;
 use std::range::Range;
 use std::sync::Arc;
 
@@ -85,7 +85,15 @@ impl Block {
     /// `cmp` must be the comparator the keys were sorted with when the block was
     /// built. A different one makes `seek` return wrong results.
     pub fn iter(self: &Arc<Self>, cmp: Arc<dyn Comparator>) -> BlockIter {
-        todo!()
+        BlockIter {
+            block: Arc::clone(self),
+            cmp,
+            current: 0,
+            restart_index: 0,
+            key: Vec::new(),
+            value: Range::from(0..0),
+            status: Ok(())
+        }
     }
 }
 
@@ -145,8 +153,41 @@ impl crate::iterator::traits::Cursor for BlockIter {
     }
 
     fn seek(&mut self, target: &[u8]) {
-        while self.key.as_slice() < target && self.current < self.block.restarts_offset {
+        if self.status.is_err() {
+            return; // keep the first error
+        }
+        let count = self.block.restarts_count as usize;
+        if count == 0 {
+            self.current = self.block.restarts_offset;
+            return;
+        }
+
+        // Binary search for the last restart point whose key is < target (or 0
+        // if there is none): everything before it is too small.
+        let (mut left, mut right) = (0, count - 1);
+        while left < right {
+            let mid = (left + right + 1) / 2;
+            let Some(key) = self.restart_key(mid) else {
+                self.current = self.block.restarts_offset;
+                self.status = Err(crate::Error::corruption(format!(
+                    "bad entry at restart point {mid}"
+                )));
+                return;
+            };
+            if self.cmp.compare(key, target) == Ordering::Less {
+                left = mid;
+            } else {
+                right = mid - 1;
+            }
+        }
+
+        // Then scan forward from there to the first key >= target.
+        self.seek_to_restart_point(left);
+        loop {
             self.next();
+            if !self.valid() || self.cmp.compare(&self.key, target) != Ordering::Less {
+                break;
+            }
         }
     }
 
@@ -204,26 +245,35 @@ impl crate::iterator::traits::Cursor for BlockIter {
     }
 }
 
+/// Decodes the three varints that start every entry (`shared`, `non_shared`,
+/// `value_len`) and advances `data` past them. Returns `None` if they are
+/// truncated or malformed.
+#[inline]
+fn decode_entry_header(data: &mut &[u8]) -> Option<(u32, u32, u32)> {
+    // Fast path: all three varints are one byte, which is almost always the
+    // case, so decode them with a single bounds check.
+    if let [a, b, c, rest @ ..] = *data
+        && (*a | *b | *c) < 128
+    {
+        *data = rest;
+        return Some((*a as u32, *b as u32, *c as u32));
+    }
+    let (mut shared, mut non_shared, mut value_len) = (0u32, 0u32, 0u32);
+    (crate::util::coding::get_varint32(data, &mut shared)
+        && crate::util::coding::get_varint32(data, &mut non_shared)
+        && crate::util::coding::get_varint32(data, &mut value_len))
+    .then_some((shared, non_shared, value_len))
+}
+
 impl BlockIter {
     fn read(&mut self, current: usize) -> bool {
         if current >= self.block.restarts_offset || !self.valid() {
             return false;
         }
         let mut data = &self.block.data[current..self.block.restarts_offset];
-        let (mut shared, mut non_shared, mut value_len) = (0u32, 0u32, 0u32);
-        if let [a, b, c, rest @ ..] = data
-            && (*a | *b | *c) < 128
-        {
-            // Fast path: all three varints are one byte, which is almost always
-            // the case, so decode them with a single bounds check.
-            (shared, non_shared, value_len) = (*a as u32, *b as u32, *c as u32);
-            data = rest;
-        } else if !(crate::util::coding::get_varint32(&mut data, &mut shared)
-            && crate::util::coding::get_varint32(&mut data, &mut non_shared)
-            && crate::util::coding::get_varint32(&mut data, &mut value_len))
-        {
+        let Some((shared, non_shared, value_len)) = decode_entry_header(&mut data) else {
             return false;
-        }
+        };
         if self.key.len() < shared as usize {
             return false;
         }
@@ -269,6 +319,24 @@ impl BlockIter {
                 break;
             }
         }
+    }
+
+    /// The full key stored at restart point `i`, as a slice of the block, or
+    /// `None` if that entry is malformed.
+    ///
+    /// A restart entry stores its whole key (`shared == 0`), so the key can be
+    /// read in place without touching the cursor's own key buffer.
+    fn restart_key(&self, i: usize) -> Option<&[u8]> {
+        let offset = self.restart_point(i);
+        if offset >= self.block.restarts_offset {
+            return None;
+        }
+        let mut data = &self.block.data[offset..self.block.restarts_offset];
+        let (shared, non_shared, value_len) = decode_entry_header(&mut data)?;
+        if shared != 0 || data.len() < non_shared as usize + value_len as usize {
+            return None;
+        }
+        Some(&data[..non_shared as usize])
     }
 
     /// The offset of the entry stored at restart point `i`.
