@@ -203,16 +203,21 @@ impl BlockIter {
             return false;
         }
         let mut data = &self.block.data[current..self.block.restarts_offset];
-        let mut shared = 0u32;
-        if !crate::util::coding::get_varint32(&mut data, &mut shared) || self.key.len() < shared as usize {
+        let (mut shared, mut non_shared, mut value_len) = (0u32, 0u32, 0u32);
+        if let [a, b, c, rest @ ..] = data
+            && (*a | *b | *c) < 128
+        {
+            // Fast path: all three varints are one byte, which is almost always
+            // the case, so decode them with a single bounds check.
+            (shared, non_shared, value_len) = (*a as u32, *b as u32, *c as u32);
+            data = rest;
+        } else if !(crate::util::coding::get_varint32(&mut data, &mut shared)
+            && crate::util::coding::get_varint32(&mut data, &mut non_shared)
+            && crate::util::coding::get_varint32(&mut data, &mut value_len))
+        {
             return false;
         }
-        let mut non_shared = 0u32;
-        if !crate::util::coding::get_varint32(&mut data, &mut non_shared) {
-            return false;
-        }
-        let mut value_len = 0u32;
-        if !crate::util::coding::get_varint32(&mut data, &mut value_len) {
+        if self.key.len() < shared as usize {
             return false;
         }
 
