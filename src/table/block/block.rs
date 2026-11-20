@@ -22,6 +22,7 @@ use std::fmt::Display;
 use crate::comparator::Comparator;
 use std::range::Range;
 use std::sync::Arc;
+use crate::iterator::traits::Cursor;
 
 /// An immutable, validated block.
 ///
@@ -101,8 +102,8 @@ pub struct BlockIter {
     /// Offset of the current entry within `block.data`. Equal to
     /// `block.restarts_offset` when the cursor is not positioned on an entry.
     current: usize,
-    /// Index of the restart point at or before `current`: where `prev` goes back
-    /// to, and where a seek's linear scan begins.
+    /// Index of the last restart point strictly before `current` (0 if none):
+    /// where `prev` goes back to, and where a seek's linear scan begins.
     restart_index: usize,
     /// The current entry's full key, rebuilt from the previous key and the
     /// stored suffix.
@@ -124,11 +125,10 @@ impl crate::iterator::traits::Cursor for BlockIter {
     fn seek_to_first(&mut self) {
         self.current = 0;
         self.restart_index = 0;
-
         self.key.clear();
         self.value.end = 0;
 
-
+        self.next();
     }
 
     fn seek_to_last(&mut self) {
@@ -141,6 +141,10 @@ impl crate::iterator::traits::Cursor for BlockIter {
 
     fn next(&mut self) {
         self.current = self.value.end;
+        if self.current >= self.block.restarts_offset {
+            self.current = self.block.restarts_offset;
+            return;
+        }
         // read the current entry
         if !self.read(self.current) {
             self.status = Err(crate::Error::corruption(format!("bad entry, unable to read block data at index {}", self.current)));
@@ -148,13 +152,36 @@ impl crate::iterator::traits::Cursor for BlockIter {
     }
 
     fn prev(&mut self) {
-        let current = self.current;
+        debug_assert!(self.valid());
+        let original = self.current;
 
-        self.current = self.restart_index;
-        while self.value.end < current {
-            self.next();
+        // Go back to a restart point strictly before the current entry.
+        while self.restart_point(self.restart_index) >= original {
+            if self.restart_index == 0 {
+                // No earlier entry: invalid.
+                self.current = self.block.restarts_offset;
+                self.restart_index = self.block.restarts_count as usize;
+                return;
+            }
+            self.restart_index -= 1;
         }
-        assert_eq!(self.value.end, current);
+
+        // Start just before that restart point, then read forward until the next
+        // entry would be the original one.
+        self.key.clear();
+        let start = self.restart_point(self.restart_index);
+        self.value = Range::from(start..start);
+        loop {
+            self.next();
+            if !self.valid() || self.value.end >= original {
+                break;
+            }
+        }
+        if self.valid() && self.value.end != original {
+            self.status = Err(crate::Error::corruption(
+                "bad entry, unable to find the entry before the current one",
+            ));
+        }
     }
 
     fn key(&self) -> &[u8] {
@@ -172,31 +199,48 @@ impl crate::iterator::traits::Cursor for BlockIter {
 
 impl BlockIter {
     fn read(&mut self, current: usize) -> bool {
-        let mut data = &self.block.data[current..];
-        let mut common_bytes_for_key = 0u32;
-        if !crate::util::coding::get_varint32(&mut data, &mut common_bytes_for_key) {
+        if current >= self.block.restarts_offset || !self.valid() {
             return false;
         }
-        let mut new_bytes_for_key = 0u32;
-        if !crate::util::coding::get_varint32(&mut data, &mut new_bytes_for_key) {
+        let mut data = &self.block.data[current..self.block.restarts_offset];
+        let mut shared = 0u32;
+        if !crate::util::coding::get_varint32(&mut data, &mut shared) || self.key.len() < shared as usize {
             return false;
         }
-        let mut value_bytes = 0u32;
-        if !crate::util::coding::get_varint32(&mut data, &mut value_bytes) {
+        let mut non_shared = 0u32;
+        if !crate::util::coding::get_varint32(&mut data, &mut non_shared) {
+            return false;
+        }
+        let mut value_len = 0u32;
+        if !crate::util::coding::get_varint32(&mut data, &mut value_len) {
             return false;
         }
 
-        // update restart_index so that prev() can start from this index and avoid looking up the restart_offsets for the closest entry
-        if common_bytes_for_key == 0 {
-            self.restart_index = current;
+        // the key delta and the value must both fit in the entries
+        if data.len() < non_shared as usize + value_len as usize {
+            return false;
         }
 
-        self.key.truncate(common_bytes_for_key as usize);
-        self.key.extend_from_slice(&data[0..new_bytes_for_key as usize]);
+        self.key.truncate(shared as usize);
+        self.key.extend_from_slice(&data[0..non_shared as usize]);
 
-        self.value.start = self.block.data.len() - data.len() + new_bytes_for_key as usize;
-        self.value.end = self.value.start + value_bytes as usize;
+        self.value.start = self.block.restarts_offset - data.len() + non_shared as usize;
+        self.value.end = self.value.start + value_len as usize;
+
+        // keep restart_index at the last restart point before `current`, so that
+        // prev() can start from it without searching the restart array
+        while self.restart_index + 1 < self.block.restarts_count as usize
+            && self.restart_point(self.restart_index + 1) < current
+        {
+            self.restart_index += 1;
+        }
 
         true
+    }
+
+    /// The offset of the entry stored at restart point `i`.
+    fn restart_point(&self, i: usize) -> usize {
+        let at = self.block.restarts_offset + 4 * i;
+        u32::from_le_bytes(self.block.data[at..at + 4].try_into().unwrap()) as usize
     }
 }
