@@ -6,5 +6,6 @@ pub mod filter;
 pub mod iterator;
 pub mod table;
 pub mod util;
+pub mod compression;
 
 pub use error::{Error, Result};
