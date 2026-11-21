@@ -35,7 +35,7 @@
 //!   compressed block only when it saves enough space, so one table can mix
 //!   both forms.
 //! * The **checksum** covers the stored bytes and the type byte, so damage to
-//!   either is caught (see [`trailer_crc`]).
+//!   either is caught (see `trailer_crc`).
 //!
 //! Integers are little-endian, except inside a [`BlockHandle`] written to an
 //! index block, where they are varints.
@@ -67,6 +67,7 @@ const MIN_COMPRESSION_SAVING_DIVISOR: usize = 8;
 /// The index block stores one handle per data block, as the value of an entry,
 /// in the varint form of [`encode_to`](Self::encode_to). The footer stores its
 /// two handles as fixed-width fields instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockHandle {
     /// Byte position of the block in the file.
     pub offset: u64,
@@ -106,6 +107,7 @@ impl BlockHandle {
 /// The builder only knows where these blocks ended up after writing them, which
 /// is why the pointers sit at the end, in a place whose position is known
 /// without reading anything else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Footer {
     /// The meta-index block.
     pub metaindex_handle: BlockHandle,
@@ -151,7 +153,7 @@ impl Footer {
 /// If `compression` is not [`CompressionType::None`], the block is compressed,
 /// but the compressed form is kept only when it is at least 1/8 smaller.
 /// Otherwise, the raw block is stored with type `None`, so a block that does not
-/// compress costs anything and the reader never has to decompress it.
+/// compress costs nothing and the reader never has to decompress it.
 ///
 /// `offset` is where this block starts in the file and becomes the handle's
 /// `offset`. The caller tracks it: the next block starts at
@@ -193,7 +195,7 @@ pub fn read_block(
     file: &dyn RandomAccessFile,
     handle: BlockHandle,
     verify_checksum: bool,
-) -> crate::error::Result<BlockHandle> {
+) -> crate::error::Result<Vec<u8>> {
     todo!()
 }
 
@@ -213,6 +215,6 @@ pub fn read_block(
 ///   `util::crc32c`).
 ///
 /// It detects accidental damage, not tampering.
-pub fn trailer_crc(stored: &[u8], type_byte: u8) -> u32 {
+fn trailer_crc(stored: &[u8], type_byte: u8) -> u32 {
     mask(extend(value(stored), &[type_byte]))
 }
