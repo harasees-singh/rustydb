@@ -59,7 +59,7 @@ pub trait RandomAccessFile: Send + Sync {
         while done < buf.len() {
             match self.read_at(offset + done as u64, &mut buf[done..])? {
                 0 => return Err(crate::error::Error::corruption("unexpected end of file")),
-                n => done += n
+                n => done += n,
             }
         }
         Ok(())
