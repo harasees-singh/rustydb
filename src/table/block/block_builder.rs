@@ -62,6 +62,7 @@ impl BlockBuilder {
     /// # Panics
     /// If `restart_interval` is 0.
     pub fn new(restart_interval: usize, cmp: Arc<dyn Comparator>) -> Self {
+        assert!(restart_interval >= 1, "restart_interval must be at least 1");
         BlockBuilder {
             restart_interval,
             cmp,
@@ -84,7 +85,8 @@ impl BlockBuilder {
         assert!(!self.finished);
         debug_assert!(
             self.buffer.is_empty()
-                || self.cmp.compare(key, self.last_key.as_slice()) == Ordering::Greater
+                || self.cmp.compare(key, self.last_key.as_slice()) == Ordering::Greater,
+            "keys must be added in increasing order"
         );
 
         let shared_count;
@@ -141,10 +143,11 @@ impl BlockBuilder {
     /// next block.
     pub fn reset(&mut self) {
         self.buffer.clear();
-        self.restarts.clear();
         self.last_key.clear();
         self.counter = 0;
         self.finished = false;
+        self.restarts.clear();
+        self.restarts.push(0);
     }
 
     /// The size in bytes the block would have if [`finish`](Self::finish) were
