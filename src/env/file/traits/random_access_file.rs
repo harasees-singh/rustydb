@@ -33,6 +33,28 @@ pub trait RandomAccessFile: Send + Sync {
     /// # Errors
     /// [`Error::Io`](crate::Error::Io) if the underlying read fails.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> crate::error::Result<usize>;
+
+    /// Fills `buf` with the bytes starting at byte `offset`, or fails.
+    ///
+    /// Unlike [`read_at`](Self::read_at), a file that ends before `buf` is full
+    /// is an error and not a short result. It is for callers that know exactly
+    /// how many bytes must exist, such as the footer or a block whose size is in
+    /// its handle, so they do not each repeat the "was it short?" check.
+    ///
+    /// On success every byte of `buf` has been written. On error the contents of
+    /// `buf` are unspecified (it may be partly filled).
+    ///
+    /// A zero-length `buf` succeeds without reading, even at or past the end of
+    /// the file.
+    ///
+    /// Safe to call from any number of threads at the same time.
+    ///
+    /// # Errors
+    /// - [`Error::Corruption`](crate::Error::Corruption) if the file ends before
+    ///   `buf` is full. A table that is shorter than its own handles say is
+    ///   damaged or truncated, which is what callers want to report.
+    /// - [`Error::Io`](crate::Error::Io) if the underlying read fails.
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> crate::error::Result<()>;
 }
 
 #[cfg(test)]

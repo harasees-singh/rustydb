@@ -16,3 +16,12 @@ pub enum CompressionType {
     // Snappy = 1,
     // Zstd = 2,
 }
+
+impl CompressionType {
+    fn from_u8(val: u8) -> Option<CompressionType> {
+        match val {
+            0 => Some(CompressionType::None),
+            _ => None,
+        }
+    }
+}
