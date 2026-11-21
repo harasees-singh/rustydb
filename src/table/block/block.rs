@@ -92,7 +92,7 @@ impl Block {
             restart_index: 0,
             key: Vec::new(),
             value: Range::from(0..0),
-            status: Ok(())
+            status: Ok(()),
         }
     }
 }
@@ -559,7 +559,12 @@ mod tests {
         // 4 + 4 * count == len fits exactly, one more does not.
         let exact = Block::new(vec![9, 9, 9, 9, 1, 0, 0, 0]).unwrap();
         assert_eq!((exact.restarts_offset, exact.restarts_count), (0, 1));
-        assert!(Block::new(vec![9, 9, 9, 9, 2, 0, 0, 0]).err().unwrap().is_corruption());
+        assert!(
+            Block::new(vec![9, 9, 9, 9, 2, 0, 0, 0])
+                .err()
+                .unwrap()
+                .is_corruption()
+        );
         assert!(Block::new(vec![0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]).is_err());
     }
 
@@ -804,7 +809,11 @@ mod tests {
 
                 let mut reversed = entries.clone();
                 reversed.reverse();
-                assert_eq!(scan_backward(&mut it), reversed, "n {n}, interval {interval}");
+                assert_eq!(
+                    scan_backward(&mut it),
+                    reversed,
+                    "n {n}, interval {interval}"
+                );
                 assert!(it.status().is_ok());
 
                 let mut targets: Vec<Vec<u8>> = entries.iter().map(|e| e.0.clone()).collect();
@@ -931,7 +940,9 @@ mod tests {
                     let at = (rng.next() as usize) % data.len();
                     data[at] = rng.next() as u8;
                 }
-                let Ok(block) = Block::new(data) else { continue };
+                let Ok(block) = Block::new(data) else {
+                    continue;
+                };
                 let mut it = Arc::new(block).iter(Arc::new(BytewiseComparator));
                 let target = random_key(&mut rng);
 

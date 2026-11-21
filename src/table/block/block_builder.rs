@@ -26,6 +26,10 @@
 //! block (interval 1, so its keys are never compressed) and the meta-index
 //! block.
 
+use crate::comparator::Comparator;
+use std::cmp::Ordering;
+use std::sync::Arc;
+
 /// Builds one block in memory from keys added in increasing order.
 ///
 /// The usual cycle is [`add`](Self::add) for every entry, then
@@ -34,6 +38,8 @@
 pub struct BlockBuilder {
     /// A full key is stored every this many entries. At least 1.
     restart_interval: usize,
+    /// Comparator to assert the keys are in sorted order
+    cmp: Arc<dyn Comparator>,
     /// The encoded entries so far, and after `finish` the whole block.
     buffer: Vec<u8>,
     /// Byte offsets of the restart points. Starts as `[0]`.
@@ -55,8 +61,16 @@ impl BlockBuilder {
     ///
     /// # Panics
     /// If `restart_interval` is 0.
-    pub fn new(restart_interval: usize) -> Self {
-        todo!()
+    pub fn new(restart_interval: usize, cmp: Arc<dyn Comparator>) -> Self {
+        BlockBuilder {
+            restart_interval,
+            cmp,
+            buffer: Vec::new(),
+            restarts: Vec::new(),
+            counter: 0,
+            last_key: Vec::new(),
+            finished: false,
+        }
     }
 
     /// Appends an entry.
@@ -67,7 +81,41 @@ impl BlockBuilder {
     /// # Panics
     /// If called after [`finish`](Self::finish) without a [`reset`](Self::reset).
     pub fn add(&mut self, key: &[u8], value: &[u8]) {
-        todo!()
+        assert!(!self.finished);
+        debug_assert_eq!(
+            self.cmp.compare(key, self.last_key.as_slice()),
+            Ordering::Greater
+        );
+
+        let shared_count;
+        if self.counter % self.restart_interval != 0 {
+            shared_count = self
+                .last_key
+                .iter()
+                .zip(key.iter())
+                .take_while(|(a, b)| a == b)
+                .count()
+        } else {
+            shared_count = 0;
+            self.restarts.push(self.buffer.len() as u32);
+        }
+
+        let diff = key.len() - shared_count;
+
+        crate::util::coding::put_varint32(&mut self.buffer, shared_count as u32);
+        crate::util::coding::put_varint32(&mut self.buffer, diff as u32);
+        crate::util::coding::put_varint32(&mut self.buffer, value.len() as u32);
+
+        self.buffer.extend_from_slice(&key[shared_count..]);
+        self.buffer.extend_from_slice(value);
+
+        self.last_key = key.to_vec();
+
+        if shared_count == 0 {
+            self.restarts.push(self.counter as u32);
+        }
+
+        self.counter += 1;
     }
 
     /// Completes the block by appending the restart array and its length, and
@@ -77,13 +125,28 @@ impl BlockBuilder {
     /// [`reset`](Self::reset) or [`add`](Self::add). An empty builder produces a
     /// valid empty block (a single restart point and no entries).
     pub fn finish(&mut self) -> &[u8] {
-        todo!()
+        // append restarts array and write the count of restarts array in little endian
+        debug_assert!(!self.finished);
+
+        self.restarts
+            .iter()
+            .for_each(|c| crate::util::coding::put_fixed32(&mut self.buffer, *c));
+
+        crate::util::coding::put_fixed32(&mut self.buffer, self.restarts.len() as u32);
+
+        self.finished = true;
+
+        self.buffer.as_slice()
     }
 
     /// Returns the builder to its empty state, keeping its allocations for the
     /// next block.
     pub fn reset(&mut self) {
-        todo!()
+        self.buffer.clear();
+        self.restarts.clear();
+        self.last_key.clear();
+        self.counter = 0;
+        self.finished = false;
     }
 
     /// The size in bytes the block would have if [`finish`](Self::finish) were
@@ -91,12 +154,12 @@ impl BlockBuilder {
     ///
     /// The table builder uses this to decide when a block is full.
     pub fn current_size_estimate(&self) -> usize {
-        todo!()
+        self.buffer.len() + self.restarts.len() + 4
     }
 
     /// Whether no entry has been added since creation or the last
     /// [`reset`](Self::reset).
     pub fn is_empty(&self) -> bool {
-        todo!()
+        self.buffer.is_empty()
     }
 }
