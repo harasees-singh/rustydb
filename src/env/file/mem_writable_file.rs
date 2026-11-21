@@ -5,20 +5,29 @@ pub struct MemWritableFile {
     data: Arc<Mutex<Vec<u8>>>,
 }
 
+impl MemWritableFile {
+    pub fn new(data: Arc<Mutex<Vec<u8>>>) -> Self {
+        Self {
+            data: Arc::clone(&data),
+        }
+    }
+}
+
 impl WritableFile for MemWritableFile {
     fn append(&mut self, data: &[u8]) -> crate::Result<()> {
-        todo!()
+        self.data.lock().unwrap().extend_from_slice(data);
+        Ok(())
     }
 
     fn flush(&mut self) -> crate::Result<()> {
-        todo!()
+        Ok(())
     }
 
     fn sync(&mut self) -> crate::Result<()> {
-        todo!()
+        Ok(())
     }
 
-    fn close(&mut self) -> crate::Result<()> {
-        todo!()
+    fn close(self: Box<Self>) -> crate::Result<()> {
+        Ok(())
     }
 }

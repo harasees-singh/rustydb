@@ -56,7 +56,7 @@ pub trait WritableFile: Send {
     /// The file must not be used afterwards, and implementations should return
     /// an error if it is. A failure here means data may have been lost, so it
     /// must not be ignored.
-    fn close(&mut self) -> Result<()>;
+    fn close(self: Box<Self>) -> Result<()>;
 }
 
 #[cfg(test)]
