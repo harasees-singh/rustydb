@@ -1,6 +1,9 @@
-use crate::compression::Compressor;
-use crate::compression::enums::CompressionType;
+use super::{CompressionType, Compressor};
 
+/// Stores bytes unchanged, so that every [`CompressionType`] has a
+/// [`Compressor`] and callers need no special case for `None`.
+///
+/// It is reached through [`compressor_for`](super::compressor_for).
 pub struct NoCompression;
 
 impl Compressor for NoCompression {
@@ -9,12 +12,12 @@ impl Compressor for NoCompression {
     }
 
     fn compress(&self, input: &[u8], output: &mut Vec<u8>) -> crate::Result<()> {
-        output.extend_from_slice(&input);
+        output.extend_from_slice(input);
         Ok(())
     }
 
     fn decompress(&self, input: &[u8], output: &mut Vec<u8>) -> crate::Result<()> {
-        output.extend_from_slice(&input);
+        output.extend_from_slice(input);
         Ok(())
     }
 }
