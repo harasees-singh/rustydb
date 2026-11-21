@@ -1,7 +1,7 @@
 mod enums;
-mod registry;
-mod traits;
 pub mod format;
 pub mod no_compression;
+mod registry;
+mod traits;
 
 pub use traits::Compressor;
