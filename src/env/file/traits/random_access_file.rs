@@ -54,7 +54,16 @@ pub trait RandomAccessFile: Send + Sync {
     ///   `buf` is full. A table that is shorter than its own handles say is
     ///   damaged or truncated, which is what callers want to report.
     /// - [`Error::Io`](crate::Error::Io) if the underlying read fails.
-    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> crate::error::Result<()>;
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> crate::error::Result<()> {
+        let mut done = 0usize;
+        while done < buf.len() {
+            match self.read_at(offset + done as u64, &mut buf[done..])? {
+                0 => return Err(crate::error::Error::corruption("unexpected end of file")),
+                n => done += n
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

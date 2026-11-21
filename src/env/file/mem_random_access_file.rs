@@ -28,17 +28,6 @@ impl RandomAccessFile for MemRandomAccessFile {
         buf[..size].copy_from_slice(&self.data[offset as usize..offset as usize + size]);
         Ok(size)
     }
-
-    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> crate::Result<()> {
-        let mut done = 0usize;
-        while done < buf.len() {
-            match self.read_at(offset + done as u64, &mut buf[done..])? {
-                0 => return Err(crate::error::Error::corruption("unexpected end of file")),
-                n => done += n
-            }
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
