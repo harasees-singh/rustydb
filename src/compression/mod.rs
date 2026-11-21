@@ -8,7 +8,6 @@
 //! [`compressor_for`].
 
 mod enums;
-pub mod format;
 mod no_compression;
 mod registry;
 mod traits;
