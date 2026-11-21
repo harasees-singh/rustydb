@@ -66,7 +66,7 @@ impl BlockBuilder {
             restart_interval,
             cmp,
             buffer: Vec::new(),
-            restarts: Vec::new(),
+            restarts: vec![0],
             counter: 0,
             last_key: Vec::new(),
             finished: false,
@@ -82,13 +82,13 @@ impl BlockBuilder {
     /// If called after [`finish`](Self::finish) without a [`reset`](Self::reset).
     pub fn add(&mut self, key: &[u8], value: &[u8]) {
         assert!(!self.finished);
-        debug_assert_eq!(
-            self.cmp.compare(key, self.last_key.as_slice()),
-            Ordering::Greater
+        debug_assert!(
+            self.buffer.is_empty()
+                || self.cmp.compare(key, self.last_key.as_slice()) == Ordering::Greater
         );
 
         let shared_count;
-        if self.counter % self.restart_interval != 0 {
+        if self.counter != self.restart_interval {
             shared_count = self
                 .last_key
                 .iter()
@@ -97,6 +97,7 @@ impl BlockBuilder {
                 .count()
         } else {
             shared_count = 0;
+            self.counter = 0;
             self.restarts.push(self.buffer.len() as u32);
         }
 
@@ -109,11 +110,8 @@ impl BlockBuilder {
         self.buffer.extend_from_slice(&key[shared_count..]);
         self.buffer.extend_from_slice(value);
 
-        self.last_key = key.to_vec();
-
-        if shared_count == 0 {
-            self.restarts.push(self.counter as u32);
-        }
+        self.last_key.truncate(shared_count);
+        self.last_key.extend_from_slice(&key[shared_count..]);
 
         self.counter += 1;
     }
@@ -126,7 +124,7 @@ impl BlockBuilder {
     /// valid empty block (a single restart point and no entries).
     pub fn finish(&mut self) -> &[u8] {
         // append restarts array and write the count of restarts array in little endian
-        debug_assert!(!self.finished);
+        assert!(!self.finished);
 
         self.restarts
             .iter()
@@ -154,7 +152,7 @@ impl BlockBuilder {
     ///
     /// The table builder uses this to decide when a block is full.
     pub fn current_size_estimate(&self) -> usize {
-        self.buffer.len() + self.restarts.len() + 4
+        self.buffer.len() + 4 * self.restarts.len() + 4
     }
 
     /// Whether no entry has been added since creation or the last
