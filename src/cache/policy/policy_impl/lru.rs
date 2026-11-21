@@ -1,6 +1,6 @@
 use crate::cache::policy::{EntryId, EvictionPolicy};
 
-/// "No neighbour": marks the ends of the list and an empty list.
+/// "No neighbor": marks the ends of the list and an empty list.
 const NIL: u32 = u32::MAX;
 
 /// Least-recently-used eviction.

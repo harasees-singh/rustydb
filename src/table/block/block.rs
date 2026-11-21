@@ -1,7 +1,7 @@
 //! Reads a block written by [`BlockBuilder`](super::block_builder::BlockBuilder).
 //!
 //! [`Block`] holds the validated bytes and [`BlockIter`] is a
-//! [`Cursor`](crate::iterator::traits::Cursor) over its entries. See the
+//! [`Cursor`] over its entries. See the
 //! builder's module docs for the byte format: prefix-compressed entries, a
 //! restart point every `restart_interval` entries, then the restart array and
 //! its length.
@@ -124,8 +124,8 @@ pub struct BlockIter {
 }
 
 /// Cursor over a block's entries. See
-/// [`Cursor`](crate::iterator::traits::Cursor) for the contract of each method.
-impl crate::iterator::traits::Cursor for BlockIter {
+/// [`Cursor`] for the contract of each method.
+impl Cursor for BlockIter {
     fn valid(&self) -> bool {
         self.status.is_ok() && self.current < self.block.restarts_offset
     }
