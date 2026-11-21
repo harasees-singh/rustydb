@@ -1,4 +1,4 @@
-use crate::compression::r#enum::compression_type::CompressionType;
+use crate::compression::enums::CompressionType;
 
 pub trait Compressor: Send + Sync {
     fn compression_type(&self) -> CompressionType;
