@@ -18,7 +18,7 @@ pub enum CompressionType {
 }
 
 impl CompressionType {
-    fn from_u8(val: u8) -> Option<CompressionType> {
+    pub fn from_u8(val: u8) -> Option<CompressionType> {
         match val {
             0 => Some(CompressionType::None),
             _ => None,
