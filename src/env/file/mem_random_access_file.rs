@@ -17,7 +17,7 @@ impl RandomAccessFile for MemRandomAccessFile {
             return Ok(0);
         }
         let size = min(buf.len() as u64, self.data.len() as u64 - offset) as usize;
-        buf.copy_from_slice(&self.data[offset as usize..offset as usize + size]);
+        buf[..size].copy_from_slice(&self.data[offset as usize..offset as usize + size]);
         Ok(size)
     }
 }
