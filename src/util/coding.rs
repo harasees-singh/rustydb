@@ -113,6 +113,11 @@ pub(crate) fn get_varint64(input: &mut &[u8], value: &mut u64) -> bool {
     let bytes: &[u8] = input;
 
     for (i, &byte) in bytes.iter().take(10).enumerate() {
+        // The 10th byte carries only bit 63, so a value above 1 would not fit in
+        // a u64. Reject it instead of silently dropping the high bits.
+        if i == 9 && byte > 1 {
+            return false;
+        }
         result |= ((byte & (B - 1u8)) as u64) << shift;
         shift += 7;
         if byte & B == 0 {
@@ -416,19 +421,43 @@ mod tests {
         assert_eq!(v, big64);
     }
 
-    // Matches LevelDB: bits of the last byte above the type's width are
-    // dropped rather than rejected. This pins the C++ behaviour.
+    // Matches LevelDB for the 32-bit decoder: bits of the 5th byte above bit 31
+    // are dropped rather than rejected. This pins the C++ behaviour.
     #[test]
-    fn get_varint_last_byte_high_bits_are_dropped_like_leveldb() {
+    fn get_varint32_last_byte_high_bits_are_dropped_like_leveldb() {
         let mut input: &[u8] = &[0x80, 0x80, 0x80, 0x80, 0x7F];
         let mut v32 = 0u32;
         assert!(get_varint32(&mut input, &mut v32));
         assert_eq!(v32, 0xF000_0000); // 0x7F << 28 keeps only 4 bits
+    }
 
-        let mut input: &[u8] = &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7F];
+    // Deliberately stricter than LevelDB: a 10th byte above 1 does not fit in a
+    // u64, so it is rejected instead of silently losing bits.
+    #[test]
+    fn get_varint64_rejects_overflowing_tenth_byte() {
+        for last in [2u8, 0x7F] {
+            let mut bytes = [0x80u8; 10];
+            bytes[9] = last;
+            let mut input: &[u8] = &bytes;
+            let mut v64 = 7u64;
+            assert!(!get_varint64(&mut input, &mut v64), "last byte {last:#x}");
+            assert_eq!((input, v64), (&bytes[..], 7), "must be unchanged");
+        }
+        // 1 is the largest valid 10th byte: it encodes bit 63.
+        let mut bytes = [0x80u8; 10];
+        bytes[9] = 1;
+        let mut input: &[u8] = &bytes;
         let mut v64 = 0u64;
         assert!(get_varint64(&mut input, &mut v64));
-        assert_eq!(v64, 1u64 << 63); // 0x7F << 63 keeps only 1 bit
+        assert_eq!(v64, 1u64 << 63);
+        assert!(input.is_empty());
+        // u64::MAX round-trips (its 10th byte is exactly 1).
+        let enc = encode_varint64(u64::MAX);
+        assert_eq!(enc.len(), 10);
+        assert_eq!(*enc.last().unwrap(), 1);
+        let mut input = &enc[..];
+        assert!(get_varint64(&mut input, &mut v64));
+        assert_eq!(v64, u64::MAX);
     }
 
     // ---- length-prefixed slices --------------------------------------------
