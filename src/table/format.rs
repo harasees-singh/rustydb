@@ -43,7 +43,6 @@
 use crate::compression::CompressionType;
 use crate::env::{RandomAccessFile, WritableFile};
 use crate::util::crc32c::{extend, mask, value};
-use std::sync::Arc;
 
 /// The last 8 bytes of every table file. A constant that identifies the file
 /// type, so opening something that is not a table fails right away instead of
@@ -276,33 +275,40 @@ pub fn read_block(
     handle: BlockHandle,
     verify_checksum: bool,
 ) -> crate::error::Result<Vec<u8>> {
-    let mut trailer: Vec<u8> = vec![0u8; BLOCK_TRAILER_SIZE];
+    let mut block_with_trailer: Vec<u8> = vec![0u8; BLOCK_TRAILER_SIZE];
 
     // handle.size is the block size excluding the trailer so the trailer must begin at handle.offset + handle.size and must be 5 bytes long
     // return early if this is not the case
-    file.read_exact_at(handle.offset + handle.size, trailer.as_mut_slice())?;
+    file.read_exact_at(
+        handle
+            .offset
+            .checked_add(handle.size + BLOCK_TRAILER_SIZE as u64)
+            .ok_or_else(|| crate::error::Error::corruption("bad block handle"))?,
+        block_with_trailer.as_mut_slice(),
+    )?;
+
+    let (block, trailer) = block_with_trailer.split_at_mut(handle.offset as usize);
+
+    // if checksum verification is enabled, compare the last 4 bytes of trailer (checksum in little endian format) with the calculated checksum
+    if verify_checksum
+        && trailer_crc(block, trailer[0]).to_le_bytes() != trailer[1..]
+    {
+        return Err(crate::error::Error::corruption(
+            "checksum mismatch for block",
+        ));
+    }
 
     if let Some(compression_type) = CompressionType::from_u8(trailer[0]) {
-        // read the block
-        let mut block: Vec<u8> = vec![0u8; handle.size as usize];
-        file.read_exact_at(handle.offset, block.as_mut_slice())?;
-
-        // if checksum verification is enabled, compare the last 4 bytes of trailer (checksum in little endian format) with the calculated checksum
-        if verify_checksum
-            && trailer_crc(block.as_slice(), compression_type as u8).to_le_bytes() != trailer[1..]
-        {
-            return Err(crate::error::Error::corruption("checksum mismatch for block"));
-        }
 
         let mut decompressed_block: Vec<u8> = Vec::new();
         crate::compression::compressor_for(compression_type)?
-            .decompress(block.as_slice(), &mut decompressed_block)?;
+            .decompress(block, &mut decompressed_block)?;
 
         return Ok(decompressed_block);
     }
 
     Err(crate::error::Error::corruption(
-        "block bytes do not conform to legitimate block bytes arrangement",
+        "unknown compression type",
     ))
 }
 
@@ -321,7 +327,7 @@ fn append_block(
 
     Ok(BlockHandle {
         offset,
-        size: block.len() as u64 + BLOCK_TRAILER_SIZE as u64,
+        size: block.len() as u64,
     })
 }
 
