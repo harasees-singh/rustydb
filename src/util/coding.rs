@@ -62,6 +62,32 @@ pub(crate) fn put_length_prefixed_slice(dst: &mut Vec<u8>, value: &[u8]) {
     dst.extend_from_slice(value);
 }
 
+pub(crate) fn get_fixed32(input: &mut &[u8], value: &mut u32) -> bool {
+    if input.len() < 4 {
+        return false;
+    }
+    let (head, tail) = input.split_at(4);
+    if let Ok(bytes) = head.try_into() {
+        *value = u32::from_le_bytes(bytes);
+        *input = tail;
+        return true;
+    }
+    false
+}
+
+pub(crate) fn get_fixed64(input: &mut &[u8], value: &mut u64) -> bool {
+    if input.len() < 8 {
+        return false;
+    }
+    let (head, tail) = input.split_at(8);
+    if let Ok(bytes) = head.try_into() {
+        *value = u64::from_le_bytes(bytes);
+        *input = tail;
+        return true;
+    }
+    false
+}
+
 pub(crate) fn get_varint32(input: &mut &[u8], value: &mut u32) -> bool {
     const B: u8 = 128;
     let mut shift = 0u32;

@@ -43,11 +43,14 @@
 use crate::compression::CompressionType;
 use crate::env::{RandomAccessFile, WritableFile};
 use crate::util::crc32c::{extend, mask, value};
+use std::sync::Arc;
 
 /// The last 8 bytes of every table file. A constant that identifies the file
 /// type, so opening something that is not a table fails right away instead of
 /// decoding garbage.
-pub const TABLE_MAGIC_NUMBER: u64 = 0xdb47_7524_8b80_fb57;
+///
+/// derived as follows: ```echo "glory is fleeting, obscurity is forever" | sha1sum | cut -c1-16```
+pub const TABLE_MAGIC_NUMBER: u64 = 0xfc71d71f11ed5ea7;
 
 /// Fixed footer size: four u64 fields + the magic number.
 pub const FOOTER_ENCODED_LENGTH: usize = 40;
@@ -81,7 +84,8 @@ impl BlockHandle {
     /// That is between 2 and 20 bytes, and small values take few bytes, which
     /// matters for the index block where there is one handle per data block.
     pub fn encode_to(&self, dst: &mut Vec<u8>) {
-        todo!()
+        crate::util::coding::put_varint64(dst, self.offset);
+        crate::util::coding::put_varint64(dst, self.size);
     }
 
     /// Reads one handle from the front of `src` and advances `src` past it, so a
@@ -92,7 +96,24 @@ impl BlockHandle {
     /// middle of a varint or a varint is longer than 10 bytes. `src` is
     /// unspecified after an error.
     pub fn decode_from(src: &mut &[u8]) -> crate::error::Result<BlockHandle> {
-        todo!()
+        let mut offset: u64 = 0;
+        let mut size: u64 = 0;
+        match crate::util::coding::get_varint64(src, &mut offset) {
+            true => match crate::util::coding::get_varint64(src, &mut size) {
+                true => {}
+                false => {
+                    return Err(crate::error::Error::corruption(
+                        "unable to read size for block handle from src",
+                    ));
+                }
+            },
+            false => {
+                return Err(crate::error::Error::corruption(
+                    "unable to read offset for block handle from src",
+                ));
+            }
+        }
+        Ok(BlockHandle { offset, size })
     }
 }
 
@@ -119,7 +140,12 @@ impl Footer {
     /// Appends exactly [`FOOTER_ENCODED_LENGTH`] bytes: the four handle fields,
     /// then [`TABLE_MAGIC_NUMBER`], each a little-endian `u64`.
     pub fn encode_to(&self, dst: &mut Vec<u8>) {
-        todo!()
+        crate::util::coding::put_fixed64(dst, self.metaindex_handle.offset);
+        crate::util::coding::put_fixed64(dst, self.metaindex_handle.size);
+        crate::util::coding::put_fixed64(dst, self.index_handle.offset);
+        crate::util::coding::put_fixed64(dst, self.index_handle.size);
+        // now put magic number as little endian fixed64
+        crate::util::coding::put_fixed64(dst, TABLE_MAGIC_NUMBER);
     }
 
     /// Reads a footer from the front of `src` and advances `src` past its
@@ -129,7 +155,43 @@ impl Footer {
     /// [`Error::Corruption`](crate::Error::Corruption) if `src` is shorter than a
     /// footer, or the magic number does not match ("not an sstable").
     pub fn decode_from(src: &mut &[u8]) -> crate::error::Result<Footer> {
-        todo!()
+        let mut index_values: Vec<u64> = Vec::with_capacity(4);
+        for _ in 0..4 {
+            let mut val = 0u64;
+            if !crate::util::coding::get_fixed64(src, &mut val) {
+                return Err(crate::error::Error::corruption(
+                    "unable to parse src into 8 byte chunks of u64",
+                ));
+            }
+            index_values.push(val);
+        }
+
+        let mut magic_number = 0u64;
+        if !crate::util::coding::get_fixed64(src, &mut magic_number) {
+            return Err(crate::error::Error::corruption(
+                "file too short to be a SSTable",
+            ));
+        }
+
+        let [metaindex_offset, metaindex_size, index_offset, index_size]: [u64; 4] = index_values
+            [..4]
+            .try_into()
+            .map_err(|_| crate::error::Error::corruption("expected exactly 4 u64 values"))?;
+        match magic_number {
+            TABLE_MAGIC_NUMBER => Ok(Footer {
+                metaindex_handle: BlockHandle {
+                    offset: metaindex_offset,
+                    size: metaindex_size,
+                },
+                index_handle: BlockHandle {
+                    offset: index_offset,
+                    size: index_size,
+                },
+            }),
+            _ => Err(crate::error::Error::corruption(
+                "file contents do not match a SSTable",
+            )),
+        }
     }
 
     /// Reads and decodes the footer from the end of `file`, which is
@@ -143,7 +205,14 @@ impl Footer {
     /// than a footer or the footer is invalid, and [`Error::Io`](crate::Error::Io)
     /// if the read fails.
     pub fn read_from(file: &dyn RandomAccessFile, file_size: u64) -> crate::error::Result<Footer> {
-        todo!()
+        let mut buffer = vec![0u8; FOOTER_ENCODED_LENGTH];
+
+        let start = file_size
+            .checked_sub(FOOTER_ENCODED_LENGTH as u64)
+            .ok_or_else(|| crate::error::Error::corruption("file is too short to be a SSTable"))?;
+
+        file.read_exact_at(start, buffer.as_mut_slice())?;
+        Footer::decode_from(&mut buffer.as_slice())
     }
 }
 
@@ -168,7 +237,18 @@ pub fn write_block(
     block: &[u8],
     compression: CompressionType,
 ) -> crate::error::Result<BlockHandle> {
-    todo!()
+    let mut compressed_block: Vec<u8> = Vec::new();
+
+    crate::compression::compressor_for(compression)?.compress(block, &mut compressed_block)?;
+
+    if compressed_block.len() * MIN_COMPRESSION_SAVING_DIVISOR
+        > block.len() * (MIN_COMPRESSION_SAVING_DIVISOR - 1)
+    {
+        // compression savings didn't meet the threshold
+        return append_block(file, block, CompressionType::None, offset);
+    }
+
+    append_block(file, compressed_block.as_slice(), compression, offset)
 }
 
 /// Reads the block that `handle` points at and returns its original bytes, ready
@@ -196,7 +276,53 @@ pub fn read_block(
     handle: BlockHandle,
     verify_checksum: bool,
 ) -> crate::error::Result<Vec<u8>> {
-    todo!()
+    let mut trailer: Vec<u8> = vec![0u8; BLOCK_TRAILER_SIZE];
+
+    // handle.size is the block size excluding the trailer so the trailer must begin at handle.offset + handle.size and must be 5 bytes long
+    // return early if this is not the case
+    file.read_exact_at(handle.offset + handle.size, trailer.as_mut_slice())?;
+
+    if let Some(compression_type) = CompressionType::from_u8(trailer[0]) {
+        // read the block
+        let mut block: Vec<u8> = vec![0u8; handle.size as usize];
+        file.read_exact_at(handle.offset, block.as_mut_slice())?;
+
+        // if checksum verification is enabled, compare the last 4 bytes of trailer (checksum in little endian format) with the calculated checksum
+        if verify_checksum
+            && trailer_crc(block.as_slice(), compression_type as u8).to_le_bytes() != trailer[1..]
+        {
+            return Err(crate::error::Error::corruption("checksum mismatch for block"));
+        }
+
+        let mut decompressed_block: Vec<u8> = Vec::new();
+        crate::compression::compressor_for(compression_type)?
+            .decompress(block.as_slice(), &mut decompressed_block)?;
+
+        return Ok(decompressed_block);
+    }
+
+    Err(crate::error::Error::corruption(
+        "block bytes do not conform to legitimate block bytes arrangement",
+    ))
+}
+
+fn append_block(
+    file: &mut dyn WritableFile,
+    block: &[u8],
+    compression: CompressionType,
+    offset: u64,
+) -> crate::error::Result<BlockHandle> {
+    file.append(block)?;
+
+    // now trailer
+    let checksum = trailer_crc(block, compression as u8);
+    file.append(&[compression as u8])?;
+    file.append(&checksum.to_le_bytes())?;
+
+    Ok(BlockHandle {
+        offset,
+        size: block.len() as u64 + BLOCK_TRAILER_SIZE as u64,
+    })
 }
 
 /// The 4 checksum bytes of a block's trailer.
