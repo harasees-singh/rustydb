@@ -275,31 +275,29 @@ pub fn read_block(
     handle: BlockHandle,
     verify_checksum: bool,
 ) -> crate::error::Result<Vec<u8>> {
-    let mut block_with_trailer: Vec<u8> = vec![0u8; BLOCK_TRAILER_SIZE];
+    let mut block_with_trailer: Vec<u8> = vec![
+        0u8;
+        handle
+            .size
+            .checked_add(BLOCK_TRAILER_SIZE as u64)
+            .ok_or_else(|| crate::error::Error::corruption("bad block handle"))?
+            as usize
+    ];
 
     // handle.size is the block size excluding the trailer so the trailer must begin at handle.offset + handle.size and must be 5 bytes long
     // return early if this is not the case
-    file.read_exact_at(
-        handle
-            .offset
-            .checked_add(handle.size + BLOCK_TRAILER_SIZE as u64)
-            .ok_or_else(|| crate::error::Error::corruption("bad block handle"))?,
-        block_with_trailer.as_mut_slice(),
-    )?;
+    file.read_exact_at(handle.offset, block_with_trailer.as_mut_slice())?;
 
-    let (block, trailer) = block_with_trailer.split_at_mut(handle.offset as usize);
+    let (block, trailer) = block_with_trailer.split_at_mut(handle.size as usize);
 
     // if checksum verification is enabled, compare the last 4 bytes of trailer (checksum in little endian format) with the calculated checksum
-    if verify_checksum
-        && trailer_crc(block, trailer[0]).to_le_bytes() != trailer[1..]
-    {
+    if verify_checksum && trailer_crc(block, trailer[0]).to_le_bytes() != trailer[1..] {
         return Err(crate::error::Error::corruption(
             "checksum mismatch for block",
         ));
     }
 
     if let Some(compression_type) = CompressionType::from_u8(trailer[0]) {
-
         let mut decompressed_block: Vec<u8> = Vec::new();
         crate::compression::compressor_for(compression_type)?
             .decompress(block, &mut decompressed_block)?;
@@ -307,9 +305,7 @@ pub fn read_block(
         return Ok(decompressed_block);
     }
 
-    Err(crate::error::Error::corruption(
-        "unknown compression type",
-    ))
+    Err(crate::error::Error::corruption("unknown compression type"))
 }
 
 fn append_block(
