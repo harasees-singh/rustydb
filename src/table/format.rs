@@ -314,12 +314,15 @@ fn append_block(
     compression: CompressionType,
     offset: u64,
 ) -> crate::error::Result<BlockHandle> {
-    file.append(block)?;
-
-    // now trailer
     let checksum = trailer_crc(block, compression as u8);
-    file.append(&[compression as u8])?;
-    file.append(&checksum.to_le_bytes())?;
+
+    let mut trailer = [0u8; BLOCK_TRAILER_SIZE];
+    trailer[0] = compression as u8;
+    trailer[1..].copy_from_slice(&trailer_crc(block, compression as u8).to_le_bytes());
+
+    // file.append()
+    file.append(block)?;
+    file.append(&trailer)?;
 
     Ok(BlockHandle {
         offset,
