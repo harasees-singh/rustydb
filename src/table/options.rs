@@ -1,9 +1,9 @@
 use crate::comparator::Comparator;
+use crate::comparator::bytewise::BytewiseComparator;
 use crate::compression::CompressionType;
+use crate::filter::bloom::BloomFilterPolicy;
 use crate::filter::traits::FilterPolicy;
 use std::sync::Arc;
-use crate::comparator::bytewise::BytewiseComparator;
-use crate::filter::bloom::BloomFilterPolicy;
 
 #[derive(Clone)]
 pub struct TableOptions {

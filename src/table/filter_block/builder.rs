@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use crate::filter::traits::FilterPolicy;
+use std::sync::Arc;
 
 /// Builds the filter block of one table.
 ///
@@ -52,7 +52,7 @@ pub struct FilterBlockBuilder {
     result: Vec<u8>,
     /// Where each finished filter starts inside `result`. Its length is the
     /// number of slots closed so far.
-    filter_offsets: Vec<u32>
+    filter_offsets: Vec<u32>,
 }
 
 impl FilterBlockBuilder {
