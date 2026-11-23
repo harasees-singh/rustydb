@@ -167,7 +167,13 @@ impl Footer {
                 ));
             }
         }
-        let [metaindex_offset, metaindex_size, index_offset, index_size, magic_number] = fields;
+        let [
+            metaindex_offset,
+            metaindex_size,
+            index_offset,
+            index_size,
+            magic_number,
+        ] = fields;
 
         if magic_number != TABLE_MAGIC_NUMBER {
             return Err(crate::error::Error::corruption(
@@ -386,7 +392,17 @@ mod tests {
 
     #[test]
     fn handle_round_trips_at_varint_boundaries() {
-        let values = [0u64, 1, 127, 128, 16383, 16384, u32::MAX as u64, 1 << 56, u64::MAX];
+        let values = [
+            0u64,
+            1,
+            127,
+            128,
+            16383,
+            16384,
+            u32::MAX as u64,
+            1 << 56,
+            u64::MAX,
+        ];
         for &offset in &values {
             for &size in &values {
                 let h = BlockHandle { offset, size };
@@ -402,7 +418,11 @@ mod tests {
     #[test]
     fn handle_decode_leaves_trailing_bytes() {
         let mut buf = Vec::new();
-        BlockHandle { offset: 300, size: 7 }.encode_to(&mut buf);
+        BlockHandle {
+            offset: 300,
+            size: 7,
+        }
+        .encode_to(&mut buf);
         buf.extend_from_slice(b"rest");
         let mut src = buf.as_slice();
         BlockHandle::decode_from(&mut src).unwrap();
@@ -412,7 +432,11 @@ mod tests {
     #[test]
     fn handle_decode_truncated_is_corruption() {
         let mut buf = Vec::new();
-        BlockHandle { offset: 1 << 40, size: 1 << 40 }.encode_to(&mut buf);
+        BlockHandle {
+            offset: 1 << 40,
+            size: 1 << 40,
+        }
+        .encode_to(&mut buf);
         for len in 0..buf.len() {
             let mut src = &buf[..len];
             let err = BlockHandle::decode_from(&mut src).unwrap_err();
@@ -423,15 +447,25 @@ mod tests {
     #[test]
     fn handle_decode_overlong_varint_is_corruption() {
         let src = [0x80u8; 11];
-        assert!(BlockHandle::decode_from(&mut &src[..]).unwrap_err().is_corruption());
+        assert!(
+            BlockHandle::decode_from(&mut &src[..])
+                .unwrap_err()
+                .is_corruption()
+        );
     }
 
     // ---- Footer --------------------------------------------------------------
 
     fn sample_footer() -> Footer {
         Footer {
-            metaindex_handle: BlockHandle { offset: 11, size: 22 },
-            index_handle: BlockHandle { offset: u64::MAX, size: 1 << 40 },
+            metaindex_handle: BlockHandle {
+                offset: 11,
+                size: 22,
+            },
+            index_handle: BlockHandle {
+                offset: u64::MAX,
+                size: 1 << 40,
+            },
         }
     }
 
@@ -461,7 +495,11 @@ mod tests {
         let mut buf = Vec::new();
         sample_footer().encode_to(&mut buf);
         buf[39] ^= 1;
-        assert!(Footer::decode_from(&mut buf.as_slice()).unwrap_err().is_corruption());
+        assert!(
+            Footer::decode_from(&mut buf.as_slice())
+                .unwrap_err()
+                .is_corruption()
+        );
     }
 
     #[test]
@@ -516,7 +554,13 @@ mod tests {
     fn write_block_at_nonzero_offset_records_it() {
         let (_data, mut file) = new_sink();
         let h = write_block(&mut file, 1234, b"x", CompressionType::None).unwrap();
-        assert_eq!(h, BlockHandle { offset: 1234, size: 1 });
+        assert_eq!(
+            h,
+            BlockHandle {
+                offset: 1234,
+                size: 1
+            }
+        );
     }
 
     #[test]
@@ -542,8 +586,15 @@ mod tests {
     fn unchecked_read_ignores_a_bad_crc() {
         let (mut bytes, handles) = write_all(&[b"abc"]);
         bytes[4] ^= 0xFF;
-        assert_eq!(read_block(&reader(bytes.clone()), handles[0], false).unwrap(), b"abc");
-        assert!(read_block(&reader(bytes), handles[0], true).unwrap_err().is_corruption());
+        assert_eq!(
+            read_block(&reader(bytes.clone()), handles[0], false).unwrap(),
+            b"abc"
+        );
+        assert!(
+            read_block(&reader(bytes), handles[0], true)
+                .unwrap_err()
+                .is_corruption()
+        );
     }
 
     #[test]
@@ -561,15 +612,39 @@ mod tests {
         let (bytes, _) = write_all(&[b"abc"]);
         let file = reader(bytes);
         let bad = [
-            BlockHandle { offset: 1000, size: 3 },
-            BlockHandle { offset: 0, size: 1000 },
-            BlockHandle { offset: u64::MAX, size: 3 },
-            BlockHandle { offset: u64::MAX - 2, size: 3 },
-            BlockHandle { offset: 0, size: u64::MAX },
-            BlockHandle { offset: 0, size: u64::MAX - 4 },
+            BlockHandle {
+                offset: 1000,
+                size: 3,
+            },
+            BlockHandle {
+                offset: 0,
+                size: 1000,
+            },
+            BlockHandle {
+                offset: u64::MAX,
+                size: 3,
+            },
+            BlockHandle {
+                offset: u64::MAX - 2,
+                size: 3,
+            },
+            BlockHandle {
+                offset: 0,
+                size: u64::MAX,
+            },
+            BlockHandle {
+                offset: 0,
+                size: u64::MAX - 4,
+            },
             // would abort the process if it were allocated
-            BlockHandle { offset: 0, size: 1 << 50 },
-            BlockHandle { offset: 0, size: MAX_BLOCK_SIZE + 1 },
+            BlockHandle {
+                offset: 0,
+                size: 1 << 50,
+            },
+            BlockHandle {
+                offset: 0,
+                size: MAX_BLOCK_SIZE + 1,
+            },
         ];
         for h in bad {
             let err = read_block(&file, h, true).unwrap_err();
@@ -580,7 +655,10 @@ mod tests {
     #[test]
     fn handle_pointing_into_the_middle_of_another_block_fails_checksum() {
         let (bytes, handles) = write_all(&[b"aaaaaaaa", b"bbbbbbbb"]);
-        let shifted = BlockHandle { offset: handles[0].offset + 1, size: handles[0].size };
+        let shifted = BlockHandle {
+            offset: handles[0].offset + 1,
+            size: handles[0].size,
+        };
         let err = read_block(&reader(bytes), shifted, true).unwrap_err();
         assert!(err.is_corruption());
     }
@@ -595,6 +673,9 @@ mod tests {
         assert_ne!(base, trailer_crc(b"dat", 0));
         assert_eq!(base, trailer_crc(b"data", 0));
         // the type byte counts as data that follows the stored bytes
-        assert_eq!(trailer_crc(b"data", 9), mask(value(&[b'd', b'a', b't', b'a', 9])));
+        assert_eq!(
+            trailer_crc(b"data", 9),
+            mask(value(&[b'd', b'a', b't', b'a', 9]))
+        );
     }
 }

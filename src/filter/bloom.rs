@@ -3,7 +3,7 @@ use crate::filter::traits::FilterPolicy;
 const K: u8 = 7;
 const N: usize = 15;
 const NAME: &str = "BLOOM_FILTER_POLICY";
-pub struct BloomFilterPolicy {}
+pub struct BloomFilterPolicy;
 impl FilterPolicy for BloomFilterPolicy {
     fn name(&self) -> &'static str {
         NAME
