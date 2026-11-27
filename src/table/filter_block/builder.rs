@@ -1,5 +1,7 @@
+use crate::filter::bloom::BloomFilterPolicy;
 use crate::filter::traits::FilterPolicy;
 use std::sync::Arc;
+use crate::table::filter_block::FILTER_BASE_LG;
 
 /// Builds the filter block of one table.
 ///
@@ -61,7 +63,13 @@ impl FilterBlockBuilder {
     /// The `policy` is used for every filter of the table, so the reader must
     /// be given a policy with the same [`name`](FilterPolicy::name).
     pub fn new(policy: Arc<dyn FilterPolicy>) -> FilterBlockBuilder {
-        todo!()
+        FilterBlockBuilder {
+            policy,
+            keys: Vec::new(),
+            key_starts: Vec::new(),
+            result: Vec::new(),
+            filter_offsets: Vec::new(),
+        }
     }
 
     /// Tells the builder that a data block starting at file offset
@@ -76,7 +84,9 @@ impl FilterBlockBuilder {
     /// Call it before the first [`add_key`](Self::add_key) of the block, and
     /// even for the first block (offset 0).
     pub fn start_block(&mut self, block_offset: u64) {
-        todo!()
+        while block_offset >> FILTER_BASE_LG > self.result.len() as u64 {
+            self.generate_filter()
+        }
     }
 
     /// Adds `key` to the filter for the current slot.
@@ -85,7 +95,8 @@ impl FilterBlockBuilder {
     /// are allowed. The key is the one that a lookup will later give to
     /// `FilterBlockReader::key_may_match`, so pass it in the same form.
     pub fn add_key(&mut self, key: &[u8]) {
-        todo!()
+        self.key_starts.push(self.keys.len() as u32);
+        self.keys.extend_from_slice(key);
     }
 
     /// Closes the last slot, appends the offset array, the array's start and
@@ -96,7 +107,19 @@ impl FilterBlockBuilder {
     /// the `FILTER_BASE_LG` byte, which a reader treats as a block with no
     /// filters.
     pub fn finish(&mut self) -> &[u8] {
-        todo!()
+        if !self.keys.is_empty() {
+           self.generate_filter();
+        }
+
+        let start_offset = self.result.len();
+
+        for offset in self.filter_offsets.iter() {
+            crate::util::coding::put_fixed32(&mut self.result, *offset);
+        }
+        crate::util::coding::put_fixed32(&mut self.result, start_offset as u32);
+        self.result.push(FILTER_BASE_LG);
+
+        self.result.as_slice()
     }
 
     /// Closes the current slot.
@@ -107,6 +130,20 @@ impl FilterBlockBuilder {
     /// append one filter for the pending keys to `result`, then clears `keys`
     /// and `key_starts` for the next slot.
     fn generate_filter(&mut self) {
-        todo!()
+        // record start offset of the new filter block
+        self.filter_offsets.push(self.result.len() as u32);
+
+        let filter_policy = BloomFilterPolicy;
+        self.key_starts.push(self.keys.len() as u32);
+        let keys: Vec<&[u8]> = (0..self.key_starts.len() - 1)
+            .map(|i| {
+                self.keys[(self.key_starts[i] as usize)..(self.key_starts[i + 1] as usize)].as_ref()
+            })
+            .collect();
+
+        filter_policy.create_filter(keys.as_slice(), &mut self.result);
+
+        self.keys.clear();
+        self.key_starts.clear();
     }
 }
