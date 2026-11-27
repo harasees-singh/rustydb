@@ -1,7 +1,6 @@
-use crate::filter::bloom::BloomFilterPolicy;
 use crate::filter::traits::FilterPolicy;
-use std::sync::Arc;
 use crate::table::filter_block::FILTER_BASE_LG;
+use std::sync::Arc;
 
 /// Builds the filter block of one table.
 ///
@@ -108,7 +107,7 @@ impl FilterBlockBuilder {
     /// filters.
     pub fn finish(&mut self) -> &[u8] {
         if !self.key_starts.is_empty() {
-           self.generate_filter();
+            self.generate_filter();
         }
 
         let start_offset = self.result.len();
@@ -150,7 +149,6 @@ impl FilterBlockBuilder {
         self.key_starts.clear();
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -217,11 +215,18 @@ mod tests {
         let filters = (0..count)
             .map(|i| {
                 let (start, limit) = (word(i), word(i + 1));
-                assert!(start <= limit && limit <= array_offset, "bad offsets at slot {i}");
+                assert!(
+                    start <= limit && limit <= array_offset,
+                    "bad offsets at slot {i}"
+                );
                 block[start..limit].to_vec()
             })
             .collect();
-        Parsed { filters, base_lg, array_offset }
+        Parsed {
+            filters,
+            base_lg,
+            array_offset,
+        }
     }
 
     fn bloom_builder() -> FilterBlockBuilder {
@@ -234,7 +239,9 @@ mod tests {
 
     /// `n` distinct keys: `prefix-0000`, `prefix-0001`, ...
     fn keys(prefix: &str, n: usize) -> Vec<Vec<u8>> {
-        (0..n).map(|i| format!("{prefix}-{i:04}").into_bytes()).collect()
+        (0..n)
+            .map(|i| format!("{prefix}-{i:04}").into_bytes())
+            .collect()
     }
 
     fn add_all(b: &mut FilterBlockBuilder, keys: &[Vec<u8>]) {
@@ -377,7 +384,10 @@ mod tests {
         b.add_key(b"second");
         let parsed = parse(&b.finish().to_vec());
         assert_eq!(parsed.filters.len(), 1);
-        assert_eq!(decode(&parsed.filters[0]), vec![b"first".to_vec(), b"second".to_vec()]);
+        assert_eq!(
+            decode(&parsed.filters[0]),
+            vec![b"first".to_vec(), b"second".to_vec()]
+        );
     }
 
     #[test]
@@ -418,14 +428,25 @@ mod tests {
         let parsed = parse(&b.finish().to_vec());
 
         assert_eq!(parsed.filters.len(), 3);
-        assert_eq!(decode(&parsed.filters[0]), vec![b"a".to_vec(), b"bb".to_vec()]);
+        assert_eq!(
+            decode(&parsed.filters[0]),
+            vec![b"a".to_vec(), b"bb".to_vec()]
+        );
         assert!(parsed.filters[1].is_empty());
-        assert_eq!(decode(&parsed.filters[2]), vec![b"ccc".to_vec(), b"ccc".to_vec()]);
+        assert_eq!(
+            decode(&parsed.filters[2]),
+            vec![b"ccc".to_vec(), b"ccc".to_vec()]
+        );
     }
 
     #[test]
     fn keys_of_different_lengths_are_split_at_the_right_places() {
-        let ks: Vec<Vec<u8>> = vec![b"x".to_vec(), b"yyyyyyyy".to_vec(), b"zz".to_vec(), b"w".to_vec()];
+        let ks: Vec<Vec<u8>> = vec![
+            b"x".to_vec(),
+            b"yyyyyyyy".to_vec(),
+            b"zz".to_vec(),
+            b"w".to_vec(),
+        ];
         let mut b = encode_builder();
         b.start_block(0);
         add_all(&mut b, &ks);
@@ -502,7 +523,10 @@ mod tests {
         let parsed = parse(&b.finish().to_vec());
         assert_eq!(parsed.filters.len(), 7);
         for slot in 1..6 {
-            assert!(parsed.filters[slot].is_empty(), "slot {slot} should be empty");
+            assert!(
+                parsed.filters[slot].is_empty(),
+                "slot {slot} should be empty"
+            );
         }
         assert!(!parsed.filters[0].is_empty());
         assert!(!parsed.filters[6].is_empty());

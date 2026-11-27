@@ -1,4 +1,6 @@
 use crate::filter::traits::FilterPolicy;
+use crate::table::filter_block::FILTER_BASE_LG;
+use std::iter::Filter;
 use std::sync::Arc;
 
 /// Reads the filter block that `FilterBlockBuilder` wrote, and answers whether a
@@ -36,7 +38,38 @@ impl FilterBlockReader {
     /// `u32`s, or if `base_lg >= 64`, the reader is built with `num_filters = 0`
     /// and answers `true` to everything.
     pub fn new(policy: Arc<dyn FilterPolicy>, contents: Vec<u8>) -> FilterBlockReader {
-        todo!()
+        if contents.len() < 5 {
+            return empty_filter(policy);
+        }
+        let base_lg = *contents.last().unwrap();
+
+        if base_lg >= 64 {
+            return empty_filter(policy);
+        }
+
+        let len = contents.len();
+
+        let array_offset =
+            u32::from_le_bytes(contents[len - 5..len - 1].try_into().unwrap()) as usize;
+
+        if array_offset >= len - 5 {
+            return empty_filter(policy);
+        }
+
+        let total_offset_bytes = len - 5 - array_offset;
+        if total_offset_bytes % 4 != 0 {
+            return empty_filter(policy);
+        }
+
+        let total_offsets = total_offset_bytes / 4;
+
+        FilterBlockReader {
+            policy,
+            data: contents,
+            array_offset,
+            num_filters: total_offsets,
+            base_lg,
+        }
     }
 
     /// Returns `false` only if `key` is definitely not in the data block that
@@ -52,7 +85,15 @@ impl FilterBlockReader {
     /// builder wrote it on purpose, so "no keys" is certain. A filter that is
     /// damaged is a different case and answers `true`.
     pub fn key_may_match(&self, block_offset: u64, key: &[u8]) -> bool {
-        todo!()
+        let slot = block_offset >> self.base_lg;
+        let Some(start) = self.offset_at(slot as usize) else {
+            return true;
+        };
+        let Some(end) = self.offset_at((slot + 1) as usize) else {
+            return true;
+        };
+
+        self.policy.key_may_match(key, self.data[start..end].as_ref())
     }
 
     /// The `i`th word of the offset array, or `None` if `i` is out of range.
@@ -60,6 +101,22 @@ impl FilterBlockReader {
     /// Word `num_filters` is `array_offset` itself, which sits right after the
     /// array. It is what ends the last filter, so no special case is needed.
     fn offset_at(&self, i: usize) -> Option<usize> {
-        todo!()
+        if i > self.num_filters {
+            return None;
+        }
+        // every step is checked: `i` comes from a block offset read from disk
+        let pos = i.checked_mul(4)?.checked_add(self.array_offset)?;
+        let bytes: [u8; 4] = self.data.get(pos..pos.checked_add(4)?)?.try_into().ok()?;
+        Some(u32::from_le_bytes(bytes) as usize)
+    }
+}
+
+fn empty_filter(policy: Arc<dyn FilterPolicy>) -> FilterBlockReader {
+    FilterBlockReader {
+        policy,
+        data: Vec::new(),
+        array_offset: 0,
+        num_filters: 0,
+        base_lg: FILTER_BASE_LG,
     }
 }
