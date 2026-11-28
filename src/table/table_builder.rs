@@ -8,7 +8,6 @@ use crate::table::filter_block::filter_meta_key;
 use crate::table::format::{BLOCK_TRAILER_SIZE, BlockHandle, Footer, MAX_BLOCK_SIZE};
 use crate::table::options::TableOptions;
 use std::cmp::Ordering;
-use std::io::Write;
 use std::sync::Arc;
 
 /// Writes one sorted table (SSTable) to a file.
@@ -128,7 +127,7 @@ impl TableBuilder {
             return Err(Error::invalid_argument("key must be greater than last key"));
         }
 
-        self.add_entry_to_index_block(key, self.pending_index_entry);
+        self.add_entry_to_index_block(key);
 
         self.data_block.add(key, value);
 
@@ -148,7 +147,7 @@ impl TableBuilder {
         Ok(())
     }
 
-    fn add_entry_to_index_block(&mut self, key: &[u8], index_handle: Option<BlockHandle>) {
+    fn add_entry_to_index_block(&mut self, key: &[u8]) {
         if let Some(index_entry) = self.pending_index_entry.take() {
             let mut v: Vec<u8> = Vec::new();
 
@@ -195,19 +194,18 @@ impl TableBuilder {
             let handle = self.write_raw(bytes, CompressionType::None)?;
             handle.encode_to(&mut value);
 
-            meta_index.add(
-                filter_meta_key(self.opts.filter_policy.take().unwrap().as_ref()).as_bytes(),
-                value.as_slice(),
-            );
+            if let Some(p) = self.opts.filter_policy.as_ref() {
+                meta_index.add(filter_meta_key(p.as_ref()).as_bytes(), value.as_slice());
+            }
         }
 
         let metaindex_handle = self.write_raw(meta_index.finish(), CompressionType::None)?;
 
-        self.last_key.push(1);
-        self.add_entry_to_index_block(
-            self.last_key.to_owned().as_slice(),
-            self.pending_index_entry,
-        );
+        self.opts
+            .comparator
+            .find_short_successor(&mut self.last_key);
+
+        self.add_entry_to_index_block(self.last_key.clone().as_slice());
 
         let mut index_block_builder = std::mem::replace(
             &mut self.index_block,
