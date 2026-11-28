@@ -5,7 +5,9 @@ use crate::error::{Error, Result};
 use crate::table::block::block_builder::BlockBuilder;
 use crate::table::filter_block::builder::FilterBlockBuilder;
 use crate::table::filter_block::filter_meta_key;
-use crate::table::format::{BLOCK_TRAILER_SIZE, BlockHandle, Footer, MAX_BLOCK_SIZE};
+use crate::table::format::{
+    BLOCK_TRAILER_SIZE, BlockHandle, FOOTER_ENCODED_LENGTH, Footer, MAX_BLOCK_SIZE,
+};
 use crate::table::options::TableOptions;
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -48,6 +50,15 @@ use std::sync::Arc;
 /// the next block's keys belong to the filter slot of that block's own start
 /// offset. The first block needs no call, since it starts at offset 0.
 ///
+/// # Compression
+/// Only data blocks use `opts.compression`. The filter, the meta-index and the
+/// index are written with [`CompressionType::None`]:
+/// - the filter is close to random bytes, so it does not compress;
+/// - the meta-index holds one small entry, so nothing can be saved;
+/// - the index is about 0.7% of the file and its entries (short separators and
+///   varint handles) compress poorly, so the saving would be a fraction of
+///   that, while opening the table would have to decompress it first.
+///
 /// # Errors
 /// After an I/O error the builder is poisoned: every later call returns that
 /// error, and the file should be discarded. A rejected key (out of order) is not
@@ -66,6 +77,10 @@ pub struct TableBuilder {
     /// The last key added. Compared with the next key, and shortened into a
     /// separator when a data block ends.
     last_key: Vec<u8>,
+    /// Scratch space for encoding a `BlockHandle` as an index entry's value. It
+    /// is cleared and reused, so adding an index entry does not allocate once
+    /// the buffer has grown (a handle is at most 20 bytes).
+    handle_buf: Vec<u8>,
     /// Handle of a data block that was just written and has no index entry yet.
     /// The entry waits for the next key, so the separator can be chosen from
     /// both sides of the gap between the blocks.
@@ -102,6 +117,7 @@ impl TableBuilder {
             index_block: BlockBuilder::new(1, Arc::clone(&opts.comparator)),
             filter,
             last_key: Vec::new(),
+            handle_buf: Vec::with_capacity(20),
             pending_index_entry: None,
             num_entries: 0,
             status: Ok(()),
@@ -127,7 +143,7 @@ impl TableBuilder {
             return Err(Error::invalid_argument("key must be greater than last key"));
         }
 
-        self.add_entry_to_index_block(key);
+        self.add_pending_index_entry(key);
 
         self.data_block.add(key, value);
 
@@ -147,19 +163,6 @@ impl TableBuilder {
         Ok(())
     }
 
-    fn add_entry_to_index_block(&mut self, key: &[u8]) {
-        if let Some(index_entry) = self.pending_index_entry.take() {
-            let mut v: Vec<u8> = Vec::new();
-
-            index_entry.encode_to(&mut v);
-            self.opts
-                .comparator
-                .find_shortest_separator(&mut self.last_key, key);
-
-            self.index_block.add(self.last_key.as_slice(), v.as_slice());
-        }
-    }
-
     /// Number of entries added so far.
     pub fn num_entries(&self) -> u64 {
         self.num_entries
@@ -168,7 +171,7 @@ impl TableBuilder {
     /// Bytes written to the file so far, not counting the data block that is
     /// still being built.
     pub fn file_size(&self) -> u64 {
-        todo!()
+        self.offset
     }
 
     /// Writes the filter, the meta-index, the index and the footer, then syncs
@@ -179,51 +182,20 @@ impl TableBuilder {
     ///
     /// # Errors
     /// The earlier error, or [`Error::Io`]. The table is complete only if this
-    /// returned `Ok`.
+    /// returned `Ok`. The builder is consumed, so an error here needs no
+    /// poisoning: the caller should discard the file.
     pub fn finish(mut self) -> Result<u64> {
         // return early
         self.status.clone()?;
         self.flush_data_block()?;
 
-        let mut meta_index = BlockBuilder::new(1, Arc::new(BytewiseComparator));
-
-        if let Some(mut filter) = self.filter.take() {
-            let mut value: Vec<u8> = Vec::new();
-            let bytes = filter.finish();
-
-            let handle = self.write_raw(bytes, CompressionType::None)?;
-            handle.encode_to(&mut value);
-
-            if let Some(p) = self.opts.filter_policy.as_ref() {
-                meta_index.add(filter_meta_key(p.as_ref()).as_bytes(), value.as_slice());
-            }
-        }
-
-        let metaindex_handle = self.write_raw(meta_index.finish(), CompressionType::None)?;
-
-        self.opts
-            .comparator
-            .find_short_successor(&mut self.last_key);
-
-        self.add_entry_to_index_block(self.last_key.clone().as_slice());
-
-        let mut index_block_builder = std::mem::replace(
-            &mut self.index_block,
-            BlockBuilder::new(1, Arc::new(BytewiseComparator)),
-        );
-        let index_handle = self.write_raw(index_block_builder.finish(), CompressionType::None)?;
-
-        // write footer and close the file
-        let footer: Footer = Footer {
+        let filter_handle = self.write_filter_block()?;
+        let metaindex_handle = self.write_meta_index_block(filter_handle)?;
+        let index_handle = self.write_index_block()?;
+        self.write_footer(Footer {
             metaindex_handle,
             index_handle,
-        };
-
-        let mut v: Vec<u8> = Vec::new();
-        footer.encode_to(&mut v);
-        self.file.append(&v)?;
-
-        self.offset += v.len() as u64;
+        })?;
 
         self.file.sync()?;
         self.file.close()?;
@@ -231,21 +203,27 @@ impl TableBuilder {
         Ok(self.offset)
     }
 
-    fn write_raw(&mut self, block: &[u8], compression: CompressionType) -> Result<BlockHandle> {
-        match crate::table::format::write_block(self.file.as_mut(), self.offset, block, compression)
-        {
-            Ok(h) => {
-                self.offset += h.size + BLOCK_TRAILER_SIZE as u64;
-                Ok(h)
-            }
-            Err(e) => Err(self.fail(e)),
-        }
-    }
-
     /// Gives up. Nothing more is written, and the file is dropped, so the caller
     /// should delete it.
     pub fn abandon(self) {
         drop(self)
+    }
+
+    /// Adds the index entry for the data block written last, if there is one
+    /// waiting. `next_key` is the first key of the block that follows, and the
+    /// entry's key is `last_key` shortened to lie between the two blocks.
+    fn add_pending_index_entry(&mut self, next_key: &[u8]) {
+        if let Some(handle) = self.pending_index_entry.take() {
+            self.handle_buf.clear();
+            handle.encode_to(&mut self.handle_buf);
+
+            self.opts
+                .comparator
+                .find_shortest_separator(&mut self.last_key, next_key);
+
+            self.index_block
+                .add(self.last_key.as_slice(), self.handle_buf.as_slice());
+        }
     }
 
     /// Writes the data block being built, if it has entries, and records its
@@ -266,17 +244,15 @@ impl TableBuilder {
             )));
         }
 
-        let handle = match (crate::table::format::write_block(
+        let handle = match write_block_and_advance(
             self.file.as_mut(),
-            self.offset,
+            &mut self.offset,
             self.data_block.finish(),
             self.opts.compression,
-        )) {
+        ) {
             Ok(handle) => handle,
             Err(e) => return Err(self.fail(e)),
         };
-
-        self.offset += handle.size + BLOCK_TRAILER_SIZE as u64;
 
         self.data_block.reset();
 
@@ -289,6 +265,90 @@ impl TableBuilder {
         Ok(())
     }
 
+    /// Writes the filter block, if there is a filter, and returns its handle.
+    /// The filter is never compressed, because it is close to random bytes.
+    fn write_filter_block(&mut self) -> Result<Option<BlockHandle>> {
+        // `take()` moves the filter builder out of `self`, so the bytes it
+        // returns borrow the local `filter` and not `self`.
+        let Some(mut filter) = self.filter.take() else {
+            return Ok(None);
+        };
+
+        let bytes = filter.finish();
+        let handle = write_block_and_advance(
+            self.file.as_mut(),
+            &mut self.offset,
+            bytes,
+            CompressionType::None,
+        )?;
+        Ok(Some(handle))
+    }
+
+    /// Writes the meta-index block and returns its handle. It has one entry,
+    /// `filter.<policy name>` -> the filter block's handle, or none if there is
+    /// no filter. The footer needs a valid handle either way.
+    ///
+    /// The block is never compressed: it is far too small to gain anything.
+    fn write_meta_index_block(&mut self, filter_handle: Option<BlockHandle>) -> Result<BlockHandle> {
+        // The keys are names, not user keys, so they use bytewise order and not
+        // the table's comparator. The reader must use bytewise order here too.
+        let mut meta_index = BlockBuilder::new(1, Arc::new(BytewiseComparator));
+
+        if let (Some(policy), Some(handle)) = (self.opts.filter_policy.as_ref(), filter_handle) {
+            self.handle_buf.clear();
+            handle.encode_to(&mut self.handle_buf);
+            meta_index.add(
+                filter_meta_key(policy.as_ref()).as_bytes(),
+                self.handle_buf.as_slice(),
+            );
+        }
+
+        write_block_and_advance(
+            self.file.as_mut(),
+            &mut self.offset,
+            meta_index.finish(),
+            CompressionType::None,
+        )
+    }
+
+    /// Adds the entry for the last data block, then writes the index block and
+    /// returns its handle.
+    ///
+    /// The last block has no next key to stay below, so its entry uses
+    /// `find_short_successor`, which only needs the result to be `>=` the key.
+    /// The block is not compressed: it is a small part of the file whose
+    /// entries compress poorly, and opening the table would have to decompress
+    /// it first.
+    fn write_index_block(&mut self) -> Result<BlockHandle> {
+        if let Some(handle) = self.pending_index_entry.take() {
+            self.opts
+                .comparator
+                .find_short_successor(&mut self.last_key);
+
+            self.handle_buf.clear();
+            handle.encode_to(&mut self.handle_buf);
+            self.index_block
+                .add(self.last_key.as_slice(), self.handle_buf.as_slice());
+        }
+
+        write_block_and_advance(
+            self.file.as_mut(),
+            &mut self.offset,
+            self.index_block.finish(),
+            CompressionType::None,
+        )
+    }
+
+    /// Appends the footer, which must be the last bytes of the file.
+    fn write_footer(&mut self, footer: Footer) -> Result<()> {
+        let mut encoded: Vec<u8> = Vec::with_capacity(FOOTER_ENCODED_LENGTH);
+        footer.encode_to(&mut encoded);
+
+        self.file.append(&encoded)?;
+        self.offset += encoded.len() as u64;
+        Ok(())
+    }
+
     /// Remembers `e` as the builder's status and returns it.
     fn fail(&mut self, e: Error) -> Error {
         if self.status.is_ok() {
@@ -296,4 +356,21 @@ impl TableBuilder {
         }
         e
     }
+}
+
+/// Appends `block` and its trailer at `*offset`, moves `*offset` past them, and
+/// returns the block's handle.
+///
+/// It takes the file and the offset as separate arguments, and not `&mut self`,
+/// so that a caller can pass bytes borrowed from another field of the builder
+/// (the data block or the index block) in the same call.
+fn write_block_and_advance(
+    file: &mut dyn WritableFile,
+    offset: &mut u64,
+    block: &[u8],
+    compression: CompressionType,
+) -> Result<BlockHandle> {
+    let handle = crate::table::format::write_block(file, *offset, block, compression)?;
+    *offset += handle.size + BLOCK_TRAILER_SIZE as u64;
+    Ok(handle)
 }
