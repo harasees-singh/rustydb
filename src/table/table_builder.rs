@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 use crate::table::block::block_builder::BlockBuilder;
 use crate::table::filter_block::builder::FilterBlockBuilder;
 use crate::table::filter_block::filter_meta_key;
-use crate::table::format::{BLOCK_TRAILER_SIZE, BlockHandle, MAX_BLOCK_SIZE, Footer};
+use crate::table::format::{BLOCK_TRAILER_SIZE, BlockHandle, Footer, MAX_BLOCK_SIZE};
 use crate::table::options::TableOptions;
 use std::cmp::Ordering;
 use std::io::Write;
@@ -118,9 +118,8 @@ impl TableBuilder {
     /// - The earlier error, if the builder is poisoned, or [`Error::Io`] from
     ///   writing a block.
     pub fn add(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        if self.status.is_err() {
-            return self.status.clone();
-        }
+        // return early
+        self.status.clone()?;
 
         // if the next key is not greater than the last key
         if self.num_entries > 0
@@ -183,6 +182,10 @@ impl TableBuilder {
     /// The earlier error, or [`Error::Io`]. The table is complete only if this
     /// returned `Ok`.
     pub fn finish(mut self) -> Result<u64> {
+        // return early
+        self.status.clone()?;
+        self.flush_data_block()?;
+
         let mut meta_index = BlockBuilder::new(1, Arc::new(BytewiseComparator));
 
         if let Some(mut filter) = self.filter.take() {
@@ -206,11 +209,11 @@ impl TableBuilder {
             self.pending_index_entry,
         );
 
-        let mut index_block_builder = std::mem::replace(&mut self.index_block, BlockBuilder::new(0, Arc::new(BytewiseComparator)));
-        let index_handle = self.write_raw(
-            index_block_builder.finish(),
-            CompressionType::None,
-        )?;
+        let mut index_block_builder = std::mem::replace(
+            &mut self.index_block,
+            BlockBuilder::new(1, Arc::new(BytewiseComparator)),
+        );
+        let index_handle = self.write_raw(index_block_builder.finish(), CompressionType::None)?;
 
         // write footer and close the file
         let footer: Footer = Footer {
