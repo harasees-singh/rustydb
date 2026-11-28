@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+use std::iter::Filter;
 use std::sync::Arc;
 use crate::env::WritableFile;
 use crate::error::{Error, Result};
@@ -22,7 +24,8 @@ use crate::table::options::TableOptions;
 ///
 /// # How it works
 /// ```text
-/// new      filter.start_block(0)
+/// new      nothing to do for the filter: the first block starts at offset 0,
+///          which is slot 0, and `start_block(0)` would close no slot
 /// add      1. reject a key that is not greater than the last one (every build,
 ///             before any state changes)
 ///          2. if an index entry is pending: shorten `last_key` against `key`,
@@ -39,8 +42,9 @@ use crate::table::options::TableOptions;
 ///          footer        -> Footer { metaindex_handle, index_handle }
 ///          sync, then close
 /// ```
-/// `filter.start_block` is called after the offset moves, because the next
-/// block's keys belong to the filter slot of that block's own start offset.
+/// `filter.start_block` is called in `flush`, after the offset moves, because
+/// the next block's keys belong to the filter slot of that block's own start
+/// offset. The first block needs no call, since it starts at offset 0.
 ///
 /// # Errors
 /// After an I/O error the builder is poisoned: every later call returns that
@@ -80,13 +84,21 @@ impl TableBuilder {
             return Err(crate::error::Error::invalid_argument("restart_interval cannot be 0"));
         }
 
+        let mut filter: Option<FilterBlockBuilder> = None;
+
+        if let Some(p) = opts.filter_policy.as_ref() {
+            let mut f = FilterBlockBuilder::new(Arc::clone(p));
+            f.start_block(0);
+            filter = Some(f);
+        }
+
         Ok(TableBuilder {
             opts: opts.clone(),
             file,
             offset: 0,
             data_block: BlockBuilder::new(opts.restart_interval, Arc::clone(&opts.comparator)),
             index_block: BlockBuilder::new(1, Arc::clone(&opts.comparator)),
-            filter: opts.filter_policy.map(|p| FilterBlockBuilder::new(p)),
+            filter,
             last_key: Vec::new(),
             pending_index_entry: None,
             num_entries: 0,
@@ -103,7 +115,42 @@ impl TableBuilder {
     /// - The earlier error, if the builder is poisoned, or [`Error::Io`] from
     ///   writing a block.
     pub fn add(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        todo!()
+
+        if self.status.is_err() {
+            return self.status.clone();
+        }
+
+        // if the next key is not greater than the last key
+        if self.num_entries > 0 && self.opts.comparator.compare(key, self.last_key.as_slice()) != Ordering::Greater {
+            self.status = Err(Error::invalid_argument("key must be greater than last key"));
+            return self.status.clone();
+        }
+
+        if let Some(index_entry) = self.pending_index_entry.take() {
+            let mut v : Vec<u8> = Vec::new();
+
+            index_entry.encode_to(&mut v);
+            self.opts.comparator.find_shortest_separator(&mut self.last_key, key);
+
+            self.index_block.add(self.last_key.as_slice(), v.as_slice());
+        }
+
+        self.data_block.add(key, value);
+
+        if let Some(filter) = self.filter.as_mut() {
+            filter.add_key(key)
+        }
+
+        self.num_entries += 1;
+
+        self.last_key.clear();
+        self.last_key.extend_from_slice(key);
+
+        if self.data_block.current_size_estimate() >= self.opts.block_size{
+            return self.flush_data_block();
+        }
+
+        Ok(())
     }
 
     /// Number of entries added so far.
