@@ -1,12 +1,11 @@
-use std::cmp::Ordering;
-use std::iter::Filter;
-use std::sync::Arc;
 use crate::env::WritableFile;
 use crate::error::{Error, Result};
 use crate::table::block::block_builder::BlockBuilder;
 use crate::table::filter_block::builder::FilterBlockBuilder;
-use crate::table::format::{BlockHandle, BLOCK_TRAILER_SIZE, MAX_BLOCK_SIZE};
+use crate::table::format::{BLOCK_TRAILER_SIZE, BlockHandle, MAX_BLOCK_SIZE};
 use crate::table::options::TableOptions;
+use std::cmp::Ordering;
+use std::sync::Arc;
 
 /// Writes one sorted table (SSTable) to a file.
 ///
@@ -81,7 +80,7 @@ impl TableBuilder {
     /// `BlockBuilder` would panic on.
     pub fn new(opts: TableOptions, file: Box<dyn WritableFile>) -> Result<TableBuilder> {
         if opts.restart_interval == 0 {
-            return Err(crate::error::Error::invalid_argument("restart_interval cannot be 0"));
+            return Err(Error::invalid_argument("restart_interval cannot be 0"));
         }
 
         let mut filter: Option<FilterBlockBuilder> = None;
@@ -115,22 +114,24 @@ impl TableBuilder {
     /// - The earlier error, if the builder is poisoned, or [`Error::Io`] from
     ///   writing a block.
     pub fn add(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-
         if self.status.is_err() {
             return self.status.clone();
         }
 
         // if the next key is not greater than the last key
-        if self.num_entries > 0 && self.opts.comparator.compare(key, self.last_key.as_slice()) != Ordering::Greater {
-            self.status = Err(Error::invalid_argument("key must be greater than last key"));
-            return self.status.clone();
+        if self.num_entries > 0
+            && self.opts.comparator.compare(key, self.last_key.as_slice()) != Ordering::Greater
+        {
+            return Err(Error::invalid_argument("key must be greater than last key"));
         }
 
         if let Some(index_entry) = self.pending_index_entry.take() {
-            let mut v : Vec<u8> = Vec::new();
+            let mut v: Vec<u8> = Vec::new();
 
             index_entry.encode_to(&mut v);
-            self.opts.comparator.find_shortest_separator(&mut self.last_key, key);
+            self.opts
+                .comparator
+                .find_shortest_separator(&mut self.last_key, key);
 
             self.index_block.add(self.last_key.as_slice(), v.as_slice());
         }
@@ -146,7 +147,7 @@ impl TableBuilder {
         self.last_key.clear();
         self.last_key.extend_from_slice(key);
 
-        if self.data_block.current_size_estimate() >= self.opts.block_size{
+        if self.data_block.current_size_estimate() >= self.opts.block_size {
             return self.flush_data_block();
         }
 
@@ -155,7 +156,7 @@ impl TableBuilder {
 
     /// Number of entries added so far.
     pub fn num_entries(&self) -> u64 {
-        todo!()
+        self.num_entries
     }
 
     /// Bytes written to the file so far, not counting the data block that is
@@ -180,7 +181,7 @@ impl TableBuilder {
     /// Gives up. Nothing more is written, and the file is dropped, so the caller
     /// should delete it.
     pub fn abandon(self) {
-        todo!()
+        drop(self)
     }
 
     /// Writes the data block being built, if it has entries, and records its
@@ -191,11 +192,44 @@ impl TableBuilder {
     /// [`MAX_BLOCK_SIZE`], because `read_block` would refuse to read it back.
     /// [`Error::Io`] if the write fails.
     fn flush_data_block(&mut self) -> Result<()> {
-        todo!()
+        if self.data_block.is_empty() {
+            return Ok(());
+        }
+
+        if self.data_block.current_size_estimate() > MAX_BLOCK_SIZE as usize {
+            return Err(self.fail(Error::invalid_argument(
+                "block size greater than max block size",
+            )));
+        }
+
+        let handle = match (crate::table::format::write_block(
+            self.file.as_mut(),
+            self.offset,
+            self.data_block.finish(),
+            self.opts.compression,
+        )) {
+            Ok(handle) => handle,
+            Err(e) => return Err(self.fail(e)),
+        };
+
+        self.offset += handle.size + BLOCK_TRAILER_SIZE as u64;
+
+        self.data_block.reset();
+
+        self.pending_index_entry = Some(handle);
+
+        if let Some(filter) = self.filter.as_mut() {
+            filter.start_block(self.offset);
+        }
+
+        Ok(())
     }
 
     /// Remembers `e` as the builder's status and returns it.
     fn fail(&mut self, e: Error) -> Error {
-        todo!()
+        if self.status.is_ok() {
+            self.status = Err(e.clone());
+        }
+        e
     }
 }

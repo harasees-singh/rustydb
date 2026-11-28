@@ -130,7 +130,6 @@ fn empty_filter(policy: Arc<dyn FilterPolicy>) -> FilterBlockReader {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,7 +181,10 @@ mod tests {
         }
         fn create_filter(&self, _keys: &[&[u8]], _dst: &mut Vec<u8>) {}
         fn key_may_match(&self, _key: &[u8], filter: &[u8]) -> bool {
-            assert!(!filter.is_empty(), "the policy was asked about an empty filter");
+            assert!(
+                !filter.is_empty(),
+                "the policy was asked about an empty filter"
+            );
             true
         }
     }
@@ -197,7 +199,9 @@ mod tests {
 
     /// `n` distinct keys: `prefix-0000`, `prefix-0001`, ...
     fn keys(prefix: &str, n: usize) -> Vec<Vec<u8>> {
-        (0..n).map(|i| format!("{prefix}-{i:04}").into_bytes()).collect()
+        (0..n)
+            .map(|i| format!("{prefix}-{i:04}").into_bytes())
+            .collect()
     }
 
     /// Builds a block with the real builder: one `(block_offset, keys)` per data block.
@@ -256,7 +260,18 @@ mod tests {
     }
 
     /// Block offsets that probe every interesting slot of the worked example.
-    const PROBE_OFFSETS: [u64; 10] = [0, 1, 2047, 2048, 4105, 6144, 8200, 10_240, 100_000, u64::MAX];
+    const PROBE_OFFSETS: [u64; 10] = [
+        0,
+        1,
+        2047,
+        2048,
+        4105,
+        6144,
+        8200,
+        10_240,
+        100_000,
+        u64::MAX,
+    ];
 
     // ---- valid blocks -------------------------------------------------------
 
@@ -347,7 +362,10 @@ mod tests {
             .filter(|i| r.key_may_match(0, format!("zz-absent-{i:05}").as_bytes()))
             .count();
         // 15 bits per key gives about 0.1%: allow 1%, and require it is not "always true"
-        assert!(false_positives <= 10, "{false_positives} of 1000 absent keys matched");
+        assert!(
+            false_positives <= 10,
+            "{false_positives} of 1000 absent keys matched"
+        );
     }
 
     // ---- blocks that say nothing --------------------------------------------
@@ -420,7 +438,10 @@ mod tests {
             let r = reader(bloom(), block);
             // 2048 is an empty slot in the valid block, so `false` here would mean it was parsed
             for offset in [0u64, 2048, 4105, 8200, u64::MAX] {
-                assert!(r.key_may_match(offset, b"a-0001"), "{name}, offset {offset}");
+                assert!(
+                    r.key_may_match(offset, b"a-0001"),
+                    "{name}, offset {offset}"
+                );
             }
         }
     }
@@ -443,8 +464,14 @@ mod tests {
             set_offset(&mut damaged, 4, bad); // the start of slot 4 moved past its limit
             let mut damaged2 = block.clone();
             set_offset(&mut damaged2, 3, bad); // the limit of slot 2 moved past the array
-            assert!(reader(bloom(), damaged).key_may_match(8200, b"never-added"), "bad {bad}");
-            assert!(reader(bloom(), damaged2).key_may_match(4105, b"never-added"), "bad {bad}");
+            assert!(
+                reader(bloom(), damaged).key_may_match(8200, b"never-added"),
+                "bad {bad}"
+            );
+            assert!(
+                reader(bloom(), damaged2).key_may_match(4105, b"never-added"),
+                "bad {bad}"
+            );
         }
     }
 
@@ -511,7 +538,10 @@ mod tests {
                 }
             }
         }
-        assert!(panicked.is_empty(), "panicked for (position, value): {panicked:?}");
+        assert!(
+            panicked.is_empty(),
+            "panicked for (position, value): {panicked:?}"
+        );
     }
 
     // ---- base_lg ------------------------------------------------------------
@@ -575,7 +605,16 @@ mod tests {
         let words: Vec<Option<usize>> = (0..8).map(|i| r.offset_at(i)).collect();
         assert_eq!(
             words,
-            vec![Some(0), Some(189), Some(189), Some(378), Some(378), Some(473), None, None]
+            vec![
+                Some(0),
+                Some(189),
+                Some(189),
+                Some(378),
+                Some(378),
+                Some(473),
+                None,
+                None
+            ]
         );
     }
 
