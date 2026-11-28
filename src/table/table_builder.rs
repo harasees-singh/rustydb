@@ -1,10 +1,14 @@
+use crate::comparator::bytewise::BytewiseComparator;
+use crate::compression::CompressionType;
 use crate::env::WritableFile;
 use crate::error::{Error, Result};
 use crate::table::block::block_builder::BlockBuilder;
 use crate::table::filter_block::builder::FilterBlockBuilder;
-use crate::table::format::{BLOCK_TRAILER_SIZE, BlockHandle, MAX_BLOCK_SIZE};
+use crate::table::filter_block::filter_meta_key;
+use crate::table::format::{BLOCK_TRAILER_SIZE, BlockHandle, MAX_BLOCK_SIZE, Footer};
 use crate::table::options::TableOptions;
 use std::cmp::Ordering;
+use std::io::Write;
 use std::sync::Arc;
 
 /// Writes one sorted table (SSTable) to a file.
@@ -125,16 +129,7 @@ impl TableBuilder {
             return Err(Error::invalid_argument("key must be greater than last key"));
         }
 
-        if let Some(index_entry) = self.pending_index_entry.take() {
-            let mut v: Vec<u8> = Vec::new();
-
-            index_entry.encode_to(&mut v);
-            self.opts
-                .comparator
-                .find_shortest_separator(&mut self.last_key, key);
-
-            self.index_block.add(self.last_key.as_slice(), v.as_slice());
-        }
+        self.add_entry_to_index_block(key, self.pending_index_entry);
 
         self.data_block.add(key, value);
 
@@ -152,6 +147,19 @@ impl TableBuilder {
         }
 
         Ok(())
+    }
+
+    fn add_entry_to_index_block(&mut self, key: &[u8], index_handle: Option<BlockHandle>) {
+        if let Some(index_entry) = self.pending_index_entry.take() {
+            let mut v: Vec<u8> = Vec::new();
+
+            index_entry.encode_to(&mut v);
+            self.opts
+                .comparator
+                .find_shortest_separator(&mut self.last_key, key);
+
+            self.index_block.add(self.last_key.as_slice(), v.as_slice());
+        }
     }
 
     /// Number of entries added so far.
@@ -174,8 +182,63 @@ impl TableBuilder {
     /// # Errors
     /// The earlier error, or [`Error::Io`]. The table is complete only if this
     /// returned `Ok`.
-    pub fn finish(self) -> Result<u64> {
-        todo!()
+    pub fn finish(mut self) -> Result<u64> {
+        let mut meta_index = BlockBuilder::new(1, Arc::new(BytewiseComparator));
+
+        if let Some(mut filter) = self.filter.take() {
+            let mut value: Vec<u8> = Vec::new();
+            let bytes = filter.finish();
+
+            let handle = self.write_raw(bytes, CompressionType::None)?;
+            handle.encode_to(&mut value);
+
+            meta_index.add(
+                filter_meta_key(self.opts.filter_policy.take().unwrap().as_ref()).as_bytes(),
+                value.as_slice(),
+            );
+        }
+
+        let metaindex_handle = self.write_raw(meta_index.finish(), CompressionType::None)?;
+
+        self.last_key.push(1);
+        self.add_entry_to_index_block(
+            self.last_key.to_owned().as_slice(),
+            self.pending_index_entry,
+        );
+
+        let mut index_block_builder = std::mem::replace(&mut self.index_block, BlockBuilder::new(0, Arc::new(BytewiseComparator)));
+        let index_handle = self.write_raw(
+            index_block_builder.finish(),
+            CompressionType::None,
+        )?;
+
+        // write footer and close the file
+        let footer: Footer = Footer {
+            metaindex_handle,
+            index_handle,
+        };
+
+        let mut v: Vec<u8> = Vec::new();
+        footer.encode_to(&mut v);
+        self.file.append(&v)?;
+
+        self.offset += v.len() as u64;
+
+        self.file.sync()?;
+        self.file.close()?;
+
+        Ok(self.offset)
+    }
+
+    fn write_raw(&mut self, block: &[u8], compression: CompressionType) -> Result<BlockHandle> {
+        match crate::table::format::write_block(self.file.as_mut(), self.offset, block, compression)
+        {
+            Ok(h) => {
+                self.offset += h.size + BLOCK_TRAILER_SIZE as u64;
+                Ok(h)
+            }
+            Err(e) => Err(self.fail(e)),
+        }
     }
 
     /// Gives up. Nothing more is written, and the file is dropped, so the caller
