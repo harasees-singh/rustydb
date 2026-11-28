@@ -374,3 +374,620 @@ fn write_block_and_advance(
     *offset += handle.size + BLOCK_TRAILER_SIZE as u64;
     Ok(handle)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::comparator::Comparator;
+    use crate::env::file::mem_random_access_file::MemRandomAccessFile;
+    use crate::env::file::mem_writable_file::MemWritableFile;
+    use crate::filter::bloom::BloomFilterPolicy;
+    use crate::iterator::traits::Cursor;
+    use crate::table::block::block::Block;
+    use crate::table::filter_block::reader::FilterBlockReader;
+    use crate::table::format::read_block;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    type Entry = (Vec<u8>, Vec<u8>);
+
+    // ---- building ------------------------------------------------------------
+
+    /// `n` entries with increasing keys: `key-000000` => `value-0`, ...
+    fn entries(n: usize) -> Vec<Entry> {
+        (0..n)
+            .map(|i| (format!("key-{i:06}").into_bytes(), format!("value-{i}").into_bytes()))
+            .collect()
+    }
+
+    fn opts(block_size: usize, filter: bool) -> TableOptions {
+        let mut o = TableOptions::default();
+        o.block_size = block_size;
+        if !filter {
+            o.filter_policy = None;
+        }
+        o
+    }
+
+    fn bytewise() -> Arc<dyn Comparator> {
+        Arc::new(BytewiseComparator)
+    }
+
+    /// A builder over an in-memory file, plus a handle on the file's bytes.
+    fn builder(o: TableOptions) -> (TableBuilder, Arc<Mutex<Vec<u8>>>) {
+        let data = Arc::new(Mutex::new(Vec::new()));
+        let file = Box::new(MemWritableFile::new(Arc::clone(&data)));
+        (TableBuilder::new(o, file).unwrap(), data)
+    }
+
+    /// Builds a whole table and returns its bytes and the size `finish` reported.
+    fn build(o: TableOptions, es: &[Entry]) -> (Vec<u8>, u64) {
+        let (mut tb, data) = builder(o);
+        for (k, v) in es {
+            tb.add(k, v).unwrap();
+        }
+        let size = tb.finish().unwrap();
+        let file = data.lock().unwrap().clone();
+        (file, size)
+    }
+
+    // ---- reading it back (no code from the reader side, only the format) ------
+
+    struct ParsedTable {
+        file: Vec<u8>,
+        footer: Footer,
+        /// (separator, handle) of each data block, in index order
+        index: Vec<(Vec<u8>, BlockHandle)>,
+        /// the entries of each data block
+        blocks: Vec<Vec<Entry>>,
+        /// the meta-index entries
+        meta: Vec<Entry>,
+    }
+
+    impl ParsedTable {
+        fn all_entries(&self) -> Vec<Entry> {
+            self.blocks.concat()
+        }
+
+        /// The byte after a block, which is the type byte of its trailer.
+        fn trailer_type(&self, h: BlockHandle) -> u8 {
+            self.file[(h.offset + h.size) as usize]
+        }
+
+        fn raw_block(&self, h: BlockHandle) -> Vec<u8> {
+            let raf = MemRandomAccessFile::new(self.file.clone());
+            read_block(&raf, h, true).unwrap()
+        }
+
+        /// Handle of the filter block, if the meta-index has one.
+        fn filter_handle(&self) -> Option<BlockHandle> {
+            self.meta.first().map(|(_, value)| {
+                let mut v: &[u8] = value;
+                let h = BlockHandle::decode_from(&mut v).unwrap();
+                assert!(v.is_empty(), "meta-index value has bytes after the handle");
+                h
+            })
+        }
+
+        fn end_of_index(&self) -> u64 {
+            self.footer.index_handle.offset + self.footer.index_handle.size + BLOCK_TRAILER_SIZE as u64
+        }
+    }
+
+    fn read_entries(raf: &MemRandomAccessFile, h: BlockHandle, cmp: &Arc<dyn Comparator>) -> Vec<Entry> {
+        let block = Arc::new(Block::new(read_block(raf, h, true).unwrap()).unwrap());
+        let mut it = block.iter(Arc::clone(cmp));
+        it.seek_to_first();
+        let mut out = Vec::new();
+        while it.valid() {
+            out.push((it.key().to_vec(), it.value().to_vec()));
+            it.next();
+        }
+        it.status().unwrap();
+        out
+    }
+
+    fn open(file: Vec<u8>, cmp: Arc<dyn Comparator>) -> ParsedTable {
+        let raf = MemRandomAccessFile::new(file.clone());
+        let footer = Footer::read_from(&raf, file.len() as u64).unwrap();
+        let mut index = Vec::new();
+        let mut blocks = Vec::new();
+        for (sep, value) in read_entries(&raf, footer.index_handle, &cmp) {
+            let mut v: &[u8] = &value;
+            let handle = BlockHandle::decode_from(&mut v).unwrap();
+            assert!(v.is_empty(), "index value has bytes after the handle");
+            blocks.push(read_entries(&raf, handle, &cmp));
+            index.push((sep, handle));
+        }
+        // the meta-index always uses bytewise order, whatever the table's comparator
+        let meta = read_entries(&raf, footer.metaindex_handle, &bytewise());
+        ParsedTable { file, footer, index, blocks, meta }
+    }
+
+    /// What every table must satisfy for a seek on the index to find the right
+    /// block: contiguous blocks in order, and each separator between its block
+    /// and the next, under the table's comparator.
+    fn assert_index_invariants(t: &ParsedTable, cmp: &dyn Comparator) {
+        assert_eq!(t.index.len(), t.blocks.len());
+        let mut expected_offset = 0u64;
+        for (i, ((sep, handle), block)) in t.index.iter().zip(&t.blocks).enumerate() {
+            assert!(!block.is_empty(), "data block {i} is empty");
+            assert_eq!(handle.offset, expected_offset, "block {i} does not follow the previous one");
+            expected_offset = handle.offset + handle.size + BLOCK_TRAILER_SIZE as u64;
+
+            let last = &block.last().unwrap().0;
+            assert_ne!(cmp.compare(sep, last), Ordering::Less, "separator {i} is below its block's last key");
+            if let Some(next) = t.blocks.get(i + 1) {
+                assert_eq!(cmp.compare(last, &next[0].0), Ordering::Less, "blocks {i} and {} overlap", i + 1);
+                assert_eq!(
+                    cmp.compare(sep, &next[0].0),
+                    Ordering::Less,
+                    "separator {i} is not below the next block's first key"
+                );
+            }
+            if i > 0 {
+                assert_eq!(cmp.compare(&t.index[i - 1].0, sep), Ordering::Less, "index keys do not increase at {i}");
+            }
+        }
+    }
+
+    /// Number of restart points in a raw block: its last 4 bytes.
+    fn restart_count(raw: &[u8]) -> usize {
+        u32::from_le_bytes(raw[raw.len() - 4..].try_into().unwrap()) as usize
+    }
+
+    // ---- an empty table, one entry, many entries ---------------------------
+
+    #[test]
+    fn an_empty_table_is_valid() {
+        for filter in [true, false] {
+            let (file, size) = build(opts(4096, filter), &[]);
+            assert_eq!(size, file.len() as u64);
+            let t = open(file, bytewise());
+            assert!(t.index.is_empty(), "no data blocks, so no index entries");
+            assert_eq!(t.meta.len(), usize::from(filter));
+            assert_eq!(t.end_of_index() + FOOTER_ENCODED_LENGTH as u64, t.file.len() as u64);
+        }
+    }
+
+    #[test]
+    fn one_entry_round_trips() {
+        for filter in [true, false] {
+            let es = entries(1);
+            let (file, size) = build(opts(4096, filter), &es);
+            assert_eq!(size, file.len() as u64);
+            let t = open(file, bytewise());
+            assert_eq!(t.all_entries(), es);
+            assert_eq!(t.index.len(), 1);
+            assert_invariants_for_bytewise(&t);
+        }
+    }
+
+    #[test]
+    fn many_entries_over_many_blocks_round_trip() {
+        for filter in [true, false] {
+            let es = entries(2000);
+            let (file, size) = build(opts(256, filter), &es);
+            assert_eq!(size, file.len() as u64);
+            let t = open(file, bytewise());
+            assert!(t.index.len() > 20, "expected many blocks, got {}", t.index.len());
+            assert_eq!(t.all_entries(), es);
+            assert_invariants_for_bytewise(&t);
+        }
+    }
+
+    fn assert_invariants_for_bytewise(t: &ParsedTable) {
+        assert_index_invariants(t, &BytewiseComparator);
+    }
+
+    #[test]
+    fn the_whole_file_is_blocks_in_order_and_then_the_footer() {
+        let (file, _) = build(opts(256, true), &entries(500));
+        let t = open(file, bytewise());
+
+        let after_data = t.index.last().map(|(_, h)| h.offset + h.size + 5).unwrap();
+        let filter = t.filter_handle().expect("a filter was configured");
+        assert_eq!(filter.offset, after_data, "the filter block follows the last data block");
+        let after_filter = filter.offset + filter.size + 5;
+        assert_eq!(t.footer.metaindex_handle.offset, after_filter);
+        let after_meta = t.footer.metaindex_handle.offset + t.footer.metaindex_handle.size + 5;
+        assert_eq!(t.footer.index_handle.offset, after_meta);
+        assert_eq!(t.end_of_index() + 40, t.file.len() as u64, "the footer is the last 40 bytes");
+    }
+
+    // ---- block size ----------------------------------------------------------
+
+    #[test]
+    fn a_block_is_flushed_once_it_reaches_block_size() {
+        let (file, _) = build(opts(256, false), &entries(1000));
+        let t = open(file, bytewise());
+        let (last, rest) = t.index.split_last().unwrap();
+        for (i, (_, h)) in rest.iter().enumerate() {
+            assert!(h.size >= 256, "block {i} was flushed early: {} bytes", h.size);
+            assert!(h.size < 256 + 40, "block {i} grew too far past block_size: {} bytes", h.size);
+        }
+        assert!(last.1.size > 0);
+    }
+
+    #[test]
+    fn block_size_one_puts_every_entry_in_its_own_block() {
+        let es = entries(5);
+        let (file, _) = build(opts(1, true), &es);
+        let t = open(file, bytewise());
+        assert_eq!(t.blocks.len(), 5);
+        assert!(t.blocks.iter().all(|b| b.len() == 1));
+        assert_eq!(t.all_entries(), es);
+        assert_invariants_for_bytewise(&t);
+    }
+
+    #[test]
+    fn an_entry_larger_than_block_size_gets_a_block_that_ends_with_it() {
+        let mut es = entries(10);
+        es[4].1 = vec![b'x'; 1000];
+        let (file, _) = build(opts(64, true), &es);
+        let t = open(file, bytewise());
+        assert_eq!(t.all_entries(), es);
+        let block = t.blocks.iter().find(|b| b.iter().any(|e| e.1.len() == 1000)).unwrap();
+        assert_eq!(block.last().unwrap().1.len(), 1000, "the big entry should end its block");
+        assert_invariants_for_bytewise(&t);
+    }
+
+    #[test]
+    fn restart_interval_reaches_the_data_blocks_and_the_index_restarts_every_entry() {
+        let mut o = opts(512, false);
+        o.restart_interval = 4;
+        let es = entries(300);
+        let (file, _) = build(o, &es);
+        let t = open(file, bytewise());
+        assert!(t.index.len() > 3);
+        for ((_, h), block) in t.index.iter().zip(&t.blocks) {
+            assert_eq!(restart_count(&t.raw_block(*h)), block.len().div_ceil(4));
+        }
+        // the index block uses interval 1, whatever the options say
+        assert_eq!(restart_count(&t.raw_block(t.footer.index_handle)), t.index.len());
+    }
+
+    #[test]
+    fn a_zero_restart_interval_is_rejected() {
+        let mut o = opts(4096, true);
+        o.restart_interval = 0;
+        let file = Box::new(MemWritableFile::new(Arc::new(Mutex::new(Vec::new()))));
+        let err = TableBuilder::new(o, file).err().expect("restart_interval 0 must be rejected");
+        assert!(err.is_invalid_argument());
+    }
+
+    // ---- the index ----------------------------------------------------------
+
+    #[test]
+    fn index_keys_are_shortened_separators_and_a_successor() {
+        // block_size 1 gives one block per key, so every gap gets a separator
+        let es: Vec<Entry> = [&b"apple"[..], b"cherry", b"zebra"]
+            .iter()
+            .map(|k| (k.to_vec(), b"v".to_vec()))
+            .collect();
+        let (file, _) = build(opts(1, false), &es);
+        let t = open(file, bytewise());
+        let keys: Vec<&[u8]> = t.index.iter().map(|(k, _)| k.as_slice()).collect();
+        // apple|cherry -> "b", cherry|zebra -> "d", and the last block gets the
+        // successor of "zebra". This pins BytewiseComparator's shortening.
+        assert_eq!(keys, vec![&b"b"[..], b"d", b"{"]);
+        assert_invariants_for_bytewise(&t);
+    }
+
+    #[test]
+    fn index_handles_decode_with_nothing_left_over_even_for_large_offsets() {
+        // a long run of blocks pushes offsets into multi-byte varints
+        let (file, _) = build(opts(128, false), &entries(5000));
+        let t = open(file, bytewise()); // `open` asserts no trailing bytes in every handle
+        assert!(t.index.last().unwrap().1.offset > 1 << 14);
+        assert_eq!(t.all_entries(), entries(5000));
+    }
+
+    // ---- the filter ---------------------------------------------------------
+
+    fn filter_reader(t: &ParsedTable) -> FilterBlockReader {
+        let h = t.filter_handle().expect("the table has a filter");
+        FilterBlockReader::new(Arc::new(BloomFilterPolicy), t.raw_block(h))
+    }
+
+    #[test]
+    fn every_key_is_found_by_the_filter_at_its_own_blocks_offset() {
+        let (file, _) = build(opts(512, true), &entries(2000));
+        let t = open(file, bytewise());
+        let r = filter_reader(&t);
+        let slots: std::collections::BTreeSet<u64> = t.index.iter().map(|(_, h)| h.offset >> 11).collect();
+        assert!(slots.len() > 10, "the test needs a table that spans many filter slots");
+        for ((_, h), block) in t.index.iter().zip(&t.blocks) {
+            for (key, _) in block {
+                assert!(r.key_may_match(h.offset, key), "filter lost {:?}", String::from_utf8_lossy(key));
+            }
+        }
+    }
+
+    #[test]
+    fn the_filter_rejects_most_absent_keys() {
+        let (file, _) = build(opts(512, true), &entries(2000));
+        let t = open(file, bytewise());
+        let r = filter_reader(&t);
+        let mut false_positives = 0;
+        for i in 0..2000usize {
+            let (_, h) = &t.index[i % t.index.len()];
+            if r.key_may_match(h.offset, format!("absent-{i:06}").as_bytes()) {
+                false_positives += 1;
+            }
+        }
+        assert!(false_positives <= 40, "{false_positives} of 2000 absent keys matched");
+    }
+
+    #[test]
+    fn the_meta_index_names_the_policy_and_points_at_the_filter() {
+        let (file, _) = build(opts(512, true), &entries(100));
+        let t = open(file, bytewise());
+        assert_eq!(t.meta.len(), 1);
+        assert_eq!(t.meta[0].0, b"filter.BLOOM_FILTER_POLICY");
+        let h = t.filter_handle().unwrap();
+        assert!(h.size > 5);
+        assert_eq!(t.raw_block(h).last().copied(), Some(11), "the filter block ends with base_lg");
+    }
+
+    #[test]
+    fn without_a_filter_policy_the_meta_index_is_empty() {
+        let (file, _) = build(opts(512, false), &entries(100));
+        let t = open(file, bytewise());
+        assert!(t.meta.is_empty());
+        assert!(t.filter_handle().is_none());
+    }
+
+    #[test]
+    fn index_meta_index_and_filter_blocks_are_stored_uncompressed() {
+        let (file, _) = build(opts(256, true), &entries(500));
+        let t = open(file, bytewise());
+        assert_eq!(t.trailer_type(t.footer.index_handle), 0);
+        assert_eq!(t.trailer_type(t.footer.metaindex_handle), 0);
+        assert_eq!(t.trailer_type(t.filter_handle().unwrap()), 0);
+    }
+
+    // ---- adding keys ----------------------------------------------------------
+
+    #[test]
+    fn a_key_that_is_not_greater_is_rejected_and_changes_nothing() {
+        let (mut tb, data) = builder(opts(4096, true));
+        tb.add(b"b", b"1").unwrap();
+        let before = data.lock().unwrap().len();
+
+        assert!(tb.add(b"a", b"x").unwrap_err().is_invalid_argument(), "smaller key");
+        assert!(tb.add(b"b", b"x").unwrap_err().is_invalid_argument(), "duplicate key");
+        assert_eq!(tb.num_entries(), 1);
+        assert_eq!(data.lock().unwrap().len(), before);
+
+        // the builder is still usable, and the rejected keys are not in the table
+        tb.add(b"c", b"2").unwrap();
+        tb.finish().unwrap();
+        let t = open(data.lock().unwrap().clone(), bytewise());
+        assert_eq!(t.all_entries(), vec![(b"b".to_vec(), b"1".to_vec()), (b"c".to_vec(), b"2".to_vec())]);
+    }
+
+    #[test]
+    fn an_empty_key_is_a_valid_first_key() {
+        let (mut tb, data) = builder(opts(4096, true));
+        tb.add(b"", b"zero").unwrap();
+        tb.add(b"a", b"one").unwrap();
+        assert!(tb.add(b"", b"again").unwrap_err().is_invalid_argument());
+        tb.finish().unwrap();
+        let t = open(data.lock().unwrap().clone(), bytewise());
+        assert_eq!(t.all_entries(), vec![(vec![], b"zero".to_vec()), (b"a".to_vec(), b"one".to_vec())]);
+        assert!(filter_reader(&t).key_may_match(0, b""));
+    }
+
+    #[test]
+    fn empty_values_and_binary_keys_round_trip() {
+        let es: Vec<Entry> = vec![
+            (vec![0x00], vec![]),
+            (vec![0x00, 0x00], vec![0xFF; 3]),
+            (vec![0x01], vec![]),
+            (vec![0x7F, 0x00, 0xFF], b"x".to_vec()),
+            (vec![0xFF, 0xFF], vec![0; 100]),
+        ];
+        let (file, _) = build(opts(16, true), &es);
+        let t = open(file, bytewise());
+        assert_eq!(t.all_entries(), es);
+        assert_invariants_for_bytewise(&t);
+    }
+
+    #[test]
+    fn num_entries_counts_accepted_entries() {
+        let (mut tb, _) = builder(opts(64, true));
+        assert_eq!(tb.num_entries(), 0);
+        for (i, (k, v)) in entries(100).iter().enumerate() {
+            tb.add(k, v).unwrap();
+            assert_eq!(tb.num_entries(), i as u64 + 1);
+        }
+    }
+
+    #[test]
+    fn file_size_counts_exactly_the_bytes_written_so_far() {
+        let (mut tb, data) = builder(opts(128, true));
+        assert_eq!(tb.file_size(), 0);
+        let mut previous = 0;
+        for (k, v) in entries(500) {
+            tb.add(&k, &v).unwrap();
+            let size = tb.file_size();
+            assert!(size >= previous, "file_size went backwards");
+            assert_eq!(size, data.lock().unwrap().len() as u64);
+            previous = size;
+        }
+        assert!(previous > 0, "some blocks should have been flushed");
+        let total = tb.finish().unwrap();
+        assert!(total > previous, "the filter, index and footer come after the data blocks");
+        assert_eq!(total, data.lock().unwrap().len() as u64);
+    }
+
+    // ---- other orderings ----------------------------------------------------
+
+    /// Reverses bytewise order. It leaves the separator methods at their
+    /// defaults, so it also checks that the builder never assumes bytewise order.
+    struct ReverseCmp;
+    impl Comparator for ReverseCmp {
+        fn compare(&self, a: &[u8], b: &[u8]) -> Ordering {
+            b.cmp(a)
+        }
+        fn name(&self) -> &'static str {
+            "test.reverse"
+        }
+    }
+
+    /// Bytewise order, but it insists on the documented precondition of
+    /// `find_shortest_separator` (`start < limit`).
+    struct StrictCmp;
+    impl Comparator for StrictCmp {
+        fn compare(&self, a: &[u8], b: &[u8]) -> Ordering {
+            a.cmp(b)
+        }
+        fn name(&self) -> &'static str {
+            "test.strict"
+        }
+        fn find_shortest_separator(&self, start: &mut Vec<u8>, limit: &[u8]) {
+            assert!(start.as_slice() < limit, "find_shortest_separator called with start >= limit");
+        }
+    }
+
+    #[test]
+    fn a_reverse_ordered_table_has_a_valid_index() {
+        let mut o = opts(128, false);
+        o.comparator = Arc::new(ReverseCmp);
+        let es: Vec<Entry> = (0..300)
+            .map(|i| (format!("key-{:06}", 999_999 - i).into_bytes(), b"v".to_vec()))
+            .collect();
+        let (file, _) = build(o, &es);
+        let t = open(file, Arc::new(ReverseCmp));
+        assert_eq!(t.all_entries(), es);
+        assert!(t.index.len() > 5);
+        // the last entry too: a bytewise "key + 1" would be below the last key here
+        assert_index_invariants(&t, &ReverseCmp);
+    }
+
+    #[test]
+    fn the_order_check_uses_the_tables_comparator() {
+        let mut o = opts(4096, false);
+        o.comparator = Arc::new(ReverseCmp);
+        let (mut tb, _) = builder(o);
+        tb.add(b"b", b"1").unwrap();
+        tb.add(b"a", b"2").unwrap(); // greater under the reverse order
+        assert!(tb.add(b"c", b"3").unwrap_err().is_invalid_argument());
+    }
+
+    #[test]
+    fn a_comparator_that_checks_the_separator_precondition_is_never_misused() {
+        let mut o = opts(128, true);
+        o.comparator = Arc::new(StrictCmp);
+        let es = entries(300);
+        let (file, _) = build(o, &es);
+        let t = open(file, Arc::new(StrictCmp));
+        assert_eq!(t.all_entries(), es);
+        assert_index_invariants(&t, &StrictCmp);
+    }
+
+    // ---- failures -------------------------------------------------------------
+
+    /// A file whose `fail_at`th `append` fails. Earlier appends are kept.
+    struct FailAt {
+        data: Arc<Mutex<Vec<u8>>>,
+        appends: Arc<AtomicUsize>,
+        fail_at: usize,
+    }
+
+    impl WritableFile for FailAt {
+        fn append(&mut self, d: &[u8]) -> Result<()> {
+            let n = self.appends.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            if n == self.fail_at {
+                return Err(Error::io("append", std::io::Error::new(std::io::ErrorKind::Other, "injected failure")));
+            }
+            self.data.lock().unwrap().extend_from_slice(d);
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn sync(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn close(self: Box<Self>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Builds a table whose `fail_at`th append fails. Returns the result, the
+    /// bytes that reached the file, and how many appends were attempted.
+    fn build_with_failure(fail_at: usize, es: &[Entry]) -> (Result<u64>, Vec<u8>, usize) {
+        let data = Arc::new(Mutex::new(Vec::new()));
+        let appends = Arc::new(AtomicUsize::new(0));
+        let file = FailAt { data: Arc::clone(&data), appends: Arc::clone(&appends), fail_at };
+        let mut tb = TableBuilder::new(opts(128, true), Box::new(file)).unwrap();
+
+        let mut first_error = None;
+        for (k, v) in es {
+            if let Err(e) = tb.add(k, v) {
+                first_error = Some(e);
+                break;
+            }
+        }
+        let result = match first_error {
+            Some(e) => {
+                // a poisoned builder must refuse to finish, with the same kind of error
+                let finish_error = tb.finish().expect_err("finish must fail after a failed add");
+                assert_eq!(finish_error.is_io_error(), e.is_io_error());
+                Err(e)
+            }
+            None => tb.finish(),
+        };
+        let bytes = data.lock().unwrap().clone();
+        (result, bytes, appends.load(AtomicOrdering::SeqCst))
+    }
+
+    fn is_a_table(bytes: &[u8]) -> bool {
+        Footer::read_from(&MemRandomAccessFile::new(bytes.to_vec()), bytes.len() as u64).is_ok()
+    }
+
+    #[test]
+    fn a_write_error_poisons_the_builder() {
+        let data = Arc::new(Mutex::new(Vec::new()));
+        let file = FailAt { data: Arc::clone(&data), appends: Arc::new(AtomicUsize::new(0)), fail_at: 1 };
+        let mut o = opts(8, true);
+        o.block_size = 8;
+        let mut tb = TableBuilder::new(o, Box::new(file)).unwrap();
+
+        assert!(tb.add(b"aaaa", b"vvvvvvvv").unwrap_err().is_io_error(), "the flush fails");
+        assert!(tb.add(b"bbbb", b"vvvvvvvv").unwrap_err().is_io_error(), "later calls return it too");
+        assert!(tb.finish().unwrap_err().is_io_error());
+        assert!(!is_a_table(&data.lock().unwrap()));
+    }
+
+    #[test]
+    fn a_write_error_at_any_point_fails_the_build_and_leaves_no_valid_table() {
+        let es = entries(60);
+        let (ok, bytes, total_appends) = build_with_failure(usize::MAX, &es);
+        assert_eq!(ok.unwrap(), bytes.len() as u64);
+        assert!(is_a_table(&bytes));
+        assert!(total_appends > 10, "expected data blocks, filter, meta-index, index and footer");
+
+        for fail_at in 1..=total_appends {
+            let (result, bytes, _) = build_with_failure(fail_at, &es);
+            let err = result.expect_err(&format!("append {fail_at} failed but the build succeeded"));
+            assert!(err.is_io_error(), "append {fail_at}");
+            assert!(!is_a_table(&bytes), "append {fail_at} failed but the file looks like a table");
+        }
+    }
+
+    #[test]
+    fn abandon_writes_no_footer() {
+        let (mut tb, data) = builder(opts(64, true));
+        for (k, v) in entries(30) {
+            tb.add(&k, &v).unwrap();
+        }
+        let written = data.lock().unwrap().len();
+        assert!(written > 0, "some data blocks were already flushed");
+        tb.abandon();
+        assert_eq!(data.lock().unwrap().len(), written, "abandon writes nothing more");
+        assert!(!is_a_table(&data.lock().unwrap()));
+    }
+}
